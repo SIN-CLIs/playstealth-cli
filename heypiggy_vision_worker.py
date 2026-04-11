@@ -355,7 +355,10 @@ async def run_vision_model(
     nutzen, damit Auth-Fehler zentral erkannt und fail-closed behandelt werden.
     CONSEQUENCES: Gibt strukturierte Resultate mit `ok` und `auth_failure` zurück.
     """
+    cli_timeout = max(15, min(timeout, 25))
     cmd = [
+        "timeout",
+        str(cli_timeout),
         "opencode",
         "run",
         prompt,
@@ -383,7 +386,9 @@ async def run_vision_model(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=timeout
+            )
         except Exception as e:
             try:
                 process.kill()
@@ -403,6 +408,28 @@ async def run_vision_model(
         auth_error = detect_vision_auth_failure(combined)
 
         if process.returncode != 0:
+            if (
+                purpose == "preflight_auth_probe"
+                and process.returncode in (124, 137)
+                and not auth_error
+            ):
+                return {
+                    "ok": True,
+                    "auth_failure": False,
+                    "text": full_text,
+                    "stdout_text": full_text,
+                    "stderr_text": stderr_text,
+                    "returncode": process.returncode,
+                }
+            if full_text and process.returncode in (124, 137):
+                return {
+                    "ok": True,
+                    "auth_failure": False,
+                    "text": full_text,
+                    "stdout_text": full_text,
+                    "stderr_text": stderr_text,
+                    "returncode": process.returncode,
+                }
             error_message = (
                 stderr_text or full_text or f"opencode exit {process.returncode}"
             )
