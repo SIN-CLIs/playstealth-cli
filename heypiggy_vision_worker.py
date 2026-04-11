@@ -2121,29 +2121,9 @@ async def main():
             await human_delay(2.0, 4.0)
             continue
 
-        # ---- DOM-KURZSCHLUSS: "Umfrage starten" Modal ----
-        # WHY: Das "Umfrage starten" Modal erscheint immer nach Consent-Bestätigung.
-        # Vision-Timeout wird umgangen indem wir den Button direkt per DOM klicken.
-        # DevTools-First / No-Assumptions: Wir suchen den Button per sichtbarem Text,
-        # anstatt CSS-Klassen zu raten.
-        start_check = await execute_bridge(
-            "execute_javascript",
-            {
-                "code": "Array.from(document.querySelectorAll('button')).some(b => b.offsetParent !== null && b.textContent.toLowerCase().includes('umfrage starten'))",
-                **_tab_params(),
-            },
-        )
-        if start_check is True:
-            audit(
-                "action",
-                message="DOM-Kurzschluss: 'Umfrage starten' Modal erkannt → klicke Start-Button direkt",
-            )
-            await click_visible_button_with_text("umfrage starten")
-            await human_delay(2.0, 3.0)
-            gate.record_step("PROCEED", img_hash, "survey_active")
-            action_desc = "Umfrage-Fragen beantworten"
-            expected = "Erste Survey-Frage sichtbar"
-            continue
+        # THROTTLE: Vor Vision-Calls länger warten um Rate-Limit zu vermeiden
+        # WHY: Antigravity hat Rate-Limits; zu schnelle Calls führen zu leeren Antworten.
+        await human_delay(3.0, 6.0)
 
         # ---- VISION CHECK ----
         decision = await ask_vision(
