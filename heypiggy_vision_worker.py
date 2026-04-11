@@ -145,7 +145,7 @@ MAX_RETRIES = 5
 #   Außerdem wird no_progress_count bei page_state='survey_active' NICHT hochgezählt.
 MAX_NO_PROGRESS = 15
 MAX_CLICK_ESCALATIONS = 5  # 5 Klick-Methoden bevor aufgegeben wird
-VISION_MODEL = "google/antigravity-gemini-3-flash"
+VISION_MODEL = "google/antigravity-gemini-3.1-pro"
 CLICK_ACTIONS = (
     "click_element",
     "click_ref",
@@ -365,8 +365,15 @@ async def run_vision_model(
         "--format",
         "json",
     ]
-    # DEBUG: Log the exact command for troubleshooting
-    audit("debug", message=f"Vision CMD: {' '.join(cmd)}", step=step_num)
+    # DEBUG: For step 1, write the exact command to a file for manual reproduction
+    if step_num == 1:
+        try:
+            with open("/tmp/vision_cmd_debug.txt", "w") as f:
+                f.write(" ".join(cmd) + "\n")
+                f.write(f"PROMPT: {prompt[:500]}...\n")
+                f.write(f"SCREENSHOT: {screenshot_path}\n")
+        except Exception:
+            pass
 
     try:
         process = await asyncio.create_subprocess_exec(
