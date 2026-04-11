@@ -1231,7 +1231,7 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
     run_result = await run_vision_model(
         prompt,
         screenshot_path,
-        timeout=120,
+        timeout=180,
         step_num=step_num,
         purpose="main_loop",
     )
@@ -2108,6 +2108,30 @@ async def main():
         if not img_path:
             gate.record_step("RETRY", None)
             await human_delay(2.0, 4.0)
+            continue
+
+        # ---- DOM-KURZSCHLUSS: "Umfrage starten" Modal ----
+        # WHY: Das "Umfrage starten" Modal erscheint immer nach Consent-Bestätigung.
+        # Vision-Timeout wird umgangen indem wir den Button direkt per DOM klicken.
+        # DevTools-First / No-Assumptions: Wir suchen den Button per sichtbarem Text,
+        # anstatt CSS-Klassen zu raten.
+        start_check = await execute_bridge(
+            "execute_javascript",
+            {
+                "code": "Array.from(document.querySelectorAll('button')).some(b => b.offsetParent !== null && b.textContent.toLowerCase().includes('umfrage starten'))",
+                **_tab_params(),
+            },
+        )
+        if start_check is True:
+            audit(
+                "action",
+                message="DOM-Kurzschluss: 'Umfrage starten' Modal erkannt → klicke Start-Button direkt",
+            )
+            await click_visible_button_with_text("umfrage starten")
+            await human_delay(2.0, 3.0)
+            gate.record_step("PROCEED", img_hash, "survey_active")
+            action_desc = "Umfrage-Fragen beantworten"
+            expected = "Erste Survey-Frage sichtbar"
             continue
 
         # ---- VISION CHECK ----
