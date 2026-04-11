@@ -365,6 +365,8 @@ async def run_vision_model(
         "--format",
         "json",
     ]
+    # DEBUG: Log the exact command for troubleshooting
+    audit("debug", message=f"Vision CMD: {' '.join(cmd)}", step=step_num)
 
     try:
         process = await asyncio.create_subprocess_exec(
