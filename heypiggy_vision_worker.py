@@ -365,7 +365,6 @@ async def run_vision_model(
         VISION_MODEL,
         "--format",
         "json",
-        "--verbose",
     ]
     # DEBUG: For step 1, write the exact command to a file for manual reproduction
     if step_num == 1:
