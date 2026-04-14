@@ -173,6 +173,47 @@ for d in [ARTIFACT_DIR, SCREENSHOT_DIR, AUDIT_DIR, SESSION_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
+# ANSWER HISTORY — Konsistenz über alle Surveys hinweg (NEU in v3.1)
+# ============================================================================
+ANSWER_HISTORY_PATH = Path("/tmp/heypiggy_answer_history.json")
+
+
+def load_answer_history():
+    """Lädt frühere Survey-Antworten für Konsistenz-Prüfung."""
+    if ANSWER_HISTORY_PATH.exists():
+        try:
+            with open(ANSWER_HISTORY_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"surveys": {}}
+
+
+def save_answer_history(data):
+    """Speichert Survey-Antworten für zukünftige Konsistenz-Prüfung."""
+    ANSWER_HISTORY_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def record_answer(question, answer):
+    """Zeichnet eine Survey-Antwort für Konsistenz-Tracking auf."""
+    hist = load_answer_history()
+    survey_id = f"survey_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if survey_id not in hist["surveys"]:
+        hist["surveys"][survey_id] = {}
+    hist["surveys"][survey_id][question] = answer
+    save_answer_history(hist)
+
+
+def get_consistent_answer(question):
+    """Holt frühere Antwort für dieselbe Frage zur Konsistenz-Sicherung."""
+    hist = load_answer_history()
+    for sid, answers in hist["surveys"].items():
+        if question in answers:
+            return answers[question]
+    return None
+
+
+# ============================================================================
 # EXAKTE TAB-BINDUNG — GLOBAL STATE (PRIORITY -7.85)
 # ============================================================================
 # CURRENT_TAB_ID und CURRENT_WINDOW_ID werden beim ersten tabs_create gesetzt
