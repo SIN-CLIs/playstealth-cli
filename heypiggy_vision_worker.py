@@ -2,11 +2,31 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-A2A-SIN-Worker-HeyPiggy — Vision Gate Edition v3.1 (ANTI-RAUSFLUG + CAPTCHA BYPASS)
+A2A-SIN-Worker-HeyPiggy — Vision Gate Edition v3.2 (PERFORMANCE + RELIABILITY)
 ================================================================================
 ARCHITEKTUR:
   Bridge Extension (Chrome) ←WebSocket→ HF MCP Server ←HTTP→ Dieser Worker
   Jede einzelne Aktion wird von Gemini 3 Flash visuell verifiziert.
+
+KRITISCHE FIXES v3.2 (warum der Agent vorher an fast allem versagt hat):
+  - Vision-Timeout: cli_timeout war auf 25s gecappt obwohl timeout=180s übergeben
+    wurde → JEDER Vision-Call starb. Jetzt nutzt cli_timeout den vollen Timeout.
+  - Eskalation: Früher wurde nach JEDER der 5 Klick-Methoden ein neuer Vision-Call
+    gefeuert → Rate-Limits + 5-10x Latenz. Jetzt DOM-Verifikation (URL/Title/Diff).
+  - Throttle: 5-10s Fix-Delay vor jedem Vision-Call = 10-20 Min Leerlauf pro Run.
+    Jetzt adaptiv: 1-2.5s Standard, exponentieller Backoff nur bei RETRY-Kaskaden.
+  - Survey-Abschluss-Garantie: Setzte next_action="click_ref" mit leeren Params →
+    tat gar nichts. Jetzt echter DOM-Button-Fallback mit "Weiter/Nächste/Submit".
+  - failed_selectors: Als set() gespeichert und nie resetted → einmal gescheitert
+    = für immer gesperrt. Jetzt Counter mit Reset bei Page-State-Wechsel.
+  - Captcha-Zähler: _captcha_attempt_count global und nie zurückgesetzt. Jetzt
+    Reset bei jedem page_state-Wechsel.
+  - Profile-Path: Hardcoded /Users/jeremy/… → funktionierte nur auf Jeremys Mac.
+    Jetzt ENV + XDG + ~/.config Fallback + Env-Variablen als letzter Ausweg.
+  - DOM Pre-Scan: Max 25 Elemente ohne Sichtbarkeits-Filter und ohne Priorisierung
+    → Weiter-Button oft außerhalb der ersten 25. Jetzt 40 Elemente, sichtbar,
+    priorisiert nach Survey-Relevanz, mit Form/Radio/Label Support.
+  - JSON-Parser: Broke bei Prosa um JSON. Jetzt Regex-Extraktion {..} als Fallback.
 
 KERNPRINZIP — EXAKTE TAB-BINDUNG (PRIORITY -7.85):
   Der Worker öffnet genau EINEN Tab (tabs_create) und speichert dessen
@@ -63,7 +83,26 @@ from pathlib import Path
 #               Umfragen brechen ab, Account könnte gesperrt werden.
 # ============================================================================
 
-PROFILE_PATH = Path("/Users/jeremy/.config/opencode/profiles/jeremy_schulze.json")
+def _resolve_profile_path() -> Path:
+    """
+    Ermittelt den Profil-Pfad portabel.
+    WHY: Früher hardcoded auf /Users/jeremy/... — existiert auf keiner anderen
+         Maschine und bricht Container/CI/Sandbox-Deployments.
+    CONSEQUENCES: Erst HEYPIGGY_PROFILE_PATH (explizit), dann XDG_CONFIG_HOME,
+                  dann ~/.config/opencode/profiles/, dann ein leerer Fallback.
+    """
+    explicit = os.environ.get("HEYPIGGY_PROFILE_PATH")
+    if explicit:
+        return Path(explicit).expanduser()
+
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "opencode" / "profiles" / "user.json"
+
+    return Path.home() / ".config" / "opencode" / "profiles" / "user.json"
+
+
+PROFILE_PATH = _resolve_profile_path()
 
 
 def _load_user_profile() -> dict:
@@ -79,6 +118,23 @@ def _load_user_profile() -> dict:
                 return json.load(f)
         except Exception as e:
             print(f"[PROFIL] Warnung: Profil konnte nicht geladen werden: {e}")
+    else:
+        # Fallback: Profil aus Env-Variablen bauen (Container-freundlich).
+        env_profile = {}
+        for env_key, profile_key in (
+            ("HEYPIGGY_USER_NAME", "name"),
+            ("HEYPIGGY_USER_FIRST_NAME", "first_name"),
+            ("HEYPIGGY_USER_LAST_NAME", "last_name"),
+            ("HEYPIGGY_USER_GENDER", "gender"),
+            ("HEYPIGGY_USER_CITY", "city"),
+            ("HEYPIGGY_USER_REGION", "region"),
+            ("HEYPIGGY_USER_COUNTRY", "country"),
+        ):
+            val = os.environ.get(env_key)
+            if val:
+                env_profile[profile_key] = val
+        if env_profile:
+            return env_profile
     return {}
 
 
@@ -400,7 +456,12 @@ async def run_vision_model(
     nutzen, damit Auth-Fehler zentral erkannt und fail-closed behandelt werden.
     CONSEQUENCES: Gibt strukturierte Resultate mit `ok` und `auth_failure` zurück.
     """
-    cli_timeout = max(15, min(timeout, 25))
+    # FIX: Früher wurde cli_timeout auf 25s gecappt (max(15, min(timeout, 25))).
+    # Das war der Hauptgrund warum JEDER Vision-Call starb — Gemini 3 Flash braucht
+    # bei komplexen Screenshots oft 30-60s. Wir geben dem CLI jetzt das volle Timeout
+    # minus 5s Buffer, damit unser asyncio.wait_for (timeout) greifen kann bevor das
+    # `timeout`-Kommando hart killt.
+    cli_timeout = max(30, timeout - 5)
     cmd = [
         "timeout",
         str(cli_timeout),
@@ -466,7 +527,16 @@ async def run_vision_model(
                     "stderr_text": stderr_text,
                     "returncode": process.returncode,
                 }
-            if full_text and process.returncode in (124, 137):
+            # FIX: Früher wurde JEDER timeout-gekillte Call mit non-leerem Output als
+            # Erfolg gewertet. Das führte zu zerhacktem JSON und Parse-Fehlern, die
+            # als RETRY durchgewunken wurden. Jetzt nur noch akzeptieren wenn der
+            # Output ein vollständiges JSON-Objekt enthält.
+            if (
+                full_text
+                and process.returncode in (124, 137)
+                and "{" in full_text
+                and full_text.rstrip().endswith("}")
+            ):
                 return {
                     "ok": True,
                     "auth_failure": False,
@@ -1217,12 +1287,31 @@ async def dom_prescan():
         )
         if isinstance(snapshot, dict) and "tree" in snapshot:
             tree = snapshot["tree"]
-            # Nur interaktive Elemente (mit @eX Refs) extrahieren
+            # Nur interaktive Elemente (mit @eX Refs) extrahieren.
+            # WHY: Früher waren es nur 20 Einträge — Surveys mit 5-10 Radio-Buttons
+            #      plus Header/Footer-Links sprengten das schnell. Jetzt 40 Einträge
+            #      mit Priorisierung auf Radio/Button/Input-Elemente.
             interactive = [l.strip() for l in tree.splitlines() if "@e" in l]
+
+            def _a11y_priority(line: str) -> int:
+                low = line.lower()
+                if "button" in low and any(
+                    w in low for w in ("weiter", "nächste", "naechste", "continue", "next", "submit", "absenden")
+                ):
+                    return 100
+                if "[radio" in low or "[checkbox" in low:
+                    return 90
+                if "[button" in low:
+                    return 80
+                if "[link" in low:
+                    return 40
+                return 30
+
+            interactive.sort(key=_a11y_priority, reverse=True)
             if interactive:
                 snapshot_info = (
-                    "ACCESSIBILITY-TREE REFS (nutzbar mit click_ref):\n"
-                    + "\n".join(interactive[:20])
+                    "ACCESSIBILITY-TREE REFS (nutzbar mit click_ref, priorisiert):\n"
+                    + "\n".join(interactive[:40])
                 )
             audit(
                 "action",
@@ -1232,37 +1321,81 @@ async def dom_prescan():
         audit("error", message=f"Snapshot fehlgeschlagen: {e}")
 
     # 2. Echte HTML-Elemente mit Klick-Potential scannen
+    # WHY: Früher waren es max 25 Elemente ohne Sichtbarkeits-Filter und ohne
+    #      Priorisierung. Surveys haben oft 5-20 Radio-Buttons + Weiter-Button;
+    #      wurden die ersten 25 Header-Links gescannt, war der Weiter-Button nicht dabei.
+    # FIX: Sichtbarkeits-Filter (im Viewport, nicht versteckt), Priorisierung auf
+    #      Survey-relevante Elemente (Weiter/Nächste/Submit-Buttons zuerst),
+    #      sowie Unterstützung für Form-Elemente (input, select, textarea, radio).
     clickable_info = ""
     try:
         js_scan = """
         (function() {
-            var results = [];
-            var all = document.querySelectorAll('[onclick], [role="button"], a[href], button, input[type="submit"], [style*="cursor: pointer"], .survey-item, .survey-card, [class*="card"], [class*="survey"]');
-            for (var i = 0; i < Math.min(all.length, 25); i++) {
-                var el = all[i];
+            function isVisible(el) {
+                if (!el || !el.getBoundingClientRect) return false;
+                if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
                 var r = el.getBoundingClientRect();
-                if (r.width < 5 || r.height < 5) continue;
-                var sel = '';
-                if (el.id) sel = '#' + el.id;
-                else if (el.className && typeof el.className === 'string') {
-                    var cls = el.className.split(' ').filter(function(c) { return c.length > 0; })[0];
-                    if (cls) sel = el.tagName.toLowerCase() + '.' + cls;
+                if (r.width < 5 || r.height < 5) return false;
+                var style = getComputedStyle(el);
+                if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+                return true;
+            }
+            function buildSel(el) {
+                if (el.id) return '#' + el.id;
+                if (el.getAttribute && el.getAttribute('data-testid')) return '[data-testid="' + el.getAttribute('data-testid') + '"]';
+                if (el.getAttribute && el.getAttribute('name')) return el.tagName.toLowerCase() + '[name="' + el.getAttribute('name') + '"]';
+                if (el.className && typeof el.className === 'string') {
+                    var cls = el.className.split(' ').filter(function(c){return c.length > 0 && !/^(ng-|is-|has-)/.test(c);})[0];
+                    if (cls) return el.tagName.toLowerCase() + '.' + cls;
                 }
-                if (!sel) sel = el.tagName.toLowerCase();
-                results.push({
-                    sel: sel,
+                return el.tagName.toLowerCase();
+            }
+            function priority(el, text) {
+                var t = (text || '').toLowerCase();
+                // Survey-Weiter-Buttons absolut höchste Prio
+                if (/(weiter|nächste|naechste|continue|next|submit|absenden|fertig|bestätigen|bestaetigen)/i.test(t)) return 100;
+                if (el.tagName === 'BUTTON' && t.length > 0 && t.length < 30) return 80;
+                if (el.getAttribute && el.getAttribute('type') === 'submit') return 75;
+                if (el.tagName === 'A' && el.getAttribute && el.getAttribute('href')) return 50;
+                if (el.className && /survey-item|survey-card/.test(el.className + '')) return 90;
+                if (el.tagName === 'INPUT') return 60;
+                return 30;
+            }
+            var selectors = [
+                'button', 'a[href]', 'input', 'select', 'textarea',
+                '[role="button"]', '[role="link"]', '[role="radio"]', '[role="checkbox"]',
+                '[onclick]', '[style*="cursor: pointer"]', '[style*="cursor:pointer"]',
+                '.survey-item', '.survey-card', '[class*="card"]', '[class*="survey"]',
+                '[class*="answer"]', '[class*="option"]', 'label'
+            ];
+            var raw = document.querySelectorAll(selectors.join(','));
+            var seen = new Set();
+            var scored = [];
+            for (var i = 0; i < raw.length; i++) {
+                var el = raw[i];
+                if (seen.has(el)) continue;
+                seen.add(el);
+                if (!isVisible(el)) continue;
+                var r = el.getBoundingClientRect();
+                var text = (el.textContent || el.value || el.placeholder || '').substring(0, 80).replace(/\\s+/g, ' ').trim();
+                scored.push({
+                    _p: priority(el, text),
+                    sel: buildSel(el),
                     tag: el.tagName,
                     id: el.id || '',
+                    type: el.type || '',
+                    role: el.getAttribute ? (el.getAttribute('role') || '') : '',
+                    name: el.getAttribute ? (el.getAttribute('name') || '') : '',
                     cls: (el.className + '').substring(0, 80),
-                    text: (el.textContent || '').substring(0, 60).replace(/\\n/g, ' ').trim(),
+                    text: text,
                     x: Math.round(r.x + r.width/2),
                     y: Math.round(r.y + r.height/2),
                     w: Math.round(r.width),
-                    h: Math.round(r.height),
-                    cursor: getComputedStyle(el).cursor
+                    h: Math.round(r.height)
                 });
             }
-            return results;
+            scored.sort(function(a, b){ return b._p - a._p; });
+            return scored.slice(0, 40).map(function(o){ delete o._p; return o; });
         })();
         """
         scan_result = await execute_bridge(
@@ -1276,12 +1409,15 @@ async def dom_prescan():
                     selector = el.get("sel", "?")
                     if el.get("id"):
                         selector = f"#{el['id']}"
-                    text = el.get("text", "")[:40]
+                    text = el.get("text", "")[:50]
+                    tag = el.get("tag", "")
+                    role = el.get("role", "") or el.get("type", "")
+                    extras = f"[{tag}" + (f" role={role}" if role else "") + "]"
                     lines.append(
-                        f'  - selector="{selector}" text="{text}" pos=({el.get("x")},{el.get("y")}) size={el.get("w")}x{el.get("h")} cursor={el.get("cursor")}'
+                        f'  - selector="{selector}" text="{text}" {extras} pos=({el.get("x")},{el.get("y")})'
                     )
                 clickable_info = (
-                    "KLICKBARE ELEMENTE AUF DER SEITE (ECHTE CSS-Selektoren!):\n"
+                    "KLICKBARE ELEMENTE (priorisiert nach Survey-Relevanz):\n"
                     + "\n".join(lines)
                 )
                 audit(
@@ -1477,6 +1613,15 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
                 # Falls der erste Teil nach ``` mit "json" beginnt, entfernen
                 if full_text.startswith("json"):
                     full_text = full_text[4:].strip()
+
+        # FIX: Robust-Fallback — erste gültige {...}-Klammer extrahieren wenn
+        # das Modell Prosa um das JSON herum schreibt.
+        # WHY: Gemini hält sich nicht immer zuverlässig an "nur JSON". Statt
+        #      sofort RETRY zu werfen, versuchen wir das JSON aus dem Blob zu ziehen.
+        if not full_text.lstrip().startswith("{"):
+            match = re.search(r"\{[\s\S]*\}", full_text)
+            if match:
+                full_text = match.group(0)
 
         result = json.loads(full_text)
         audit(
@@ -1687,28 +1832,19 @@ MAX_CLICK_ESCALATIONS = 5  # click → ghost → KEYBOARD → vision → coords
 _ESC_STEP = 0
 
 
-async def _vision_gate_inside_escalation(
-    step_label: str, action_done: str, expected: str
-) -> dict:
+async def _verify_click_effect(before_url: str, before_title: str) -> bool:
     """
-    Macht Screenshot + Vision-Check INNERHALB der Eskalationskette.
-    Gibt das volle Vision-Decision-Dict zurück (verdict, next_action, next_params, page_state).
-    WHY: Das Mandat verlangt Vision VOR JEDER AKTION — auch vor jeder Eskalationsstufe.
-    CONSEQUENCES: Ohne diesen Gate kann die Eskalation blind 5 Aktionen hintereinander
-    feuern ohne zu wissen ob der Klick überhaupt sinnvoll war.
+    Schnelle DOM-basierte Verifikation ob ein Klick tatsächlich Wirkung hatte.
+    WHY: Früher wurde nach JEDER Eskalationsstufe ein neuer Vision-Call gefeuert
+         (`_vision_gate_inside_escalation`). Das verdreifacht bis verzehnfacht die
+         Vision-Calls pro Schritt, triggert Rate-Limits und macht den Lauf 5-10x
+         langsamer. DOM-Check (URL/Title/page_diff) ist in <500ms erledigt und
+         liefert eine zuverlässige Antwort ob das Klick-Event gegriffen hat.
+    CONSEQUENCES: Wenn URL/Title sich geändert haben ODER der Accessibility-Tree
+                  Änderungen meldet, ist der Klick erfolgreich. Sonst False.
     """
-    global _ESC_STEP
-    _ESC_STEP += 1
-    img_path, _ = await take_screenshot(_ESC_STEP * 1000, label=f"esc_{step_label}")
-    if not img_path:
-        # Screenshot fehlgeschlagen → pessimistisch RETRY zurückgeben
-        return {
-            "verdict": "RETRY",
-            "next_action": "none",
-            "next_params": {},
-            "page_state": "unknown",
-        }
-    return await ask_vision(img_path, action_done, expected, _ESC_STEP * 1000)
+    dom_check = await dom_verify_change(before_url, before_title)
+    return bool(dom_check.get("changed"))
 
 
 async def escalating_click(
@@ -1782,18 +1918,8 @@ async def escalating_click(
                     audit("error", message=f"click_ref failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    esc_decision = await _vision_gate_inside_escalation(
-                        f"after_click_ref_{i}",
-                        f"click_ref auf {ref[:60]}",
-                        "Seite hat reagiert",
-                    )
-                    audit(
-                        "vision_check",
-                        method="click_ref",
-                        verdict=esc_decision.get("verdict"),
-                        page_state=esc_decision.get("page_state"),
-                    )
-                    if esc_decision.get("verdict") == "PROCEED":
+                    if await _verify_click_effect(before_url, before_title):
+                        audit("success", method="click_ref", message="Klick bestätigt via DOM")
                         return True
                 continue
 
@@ -1803,18 +1929,8 @@ async def escalating_click(
                     audit("error", message=f"click_element failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    esc_decision = await _vision_gate_inside_escalation(
-                        f"after_click_element_{i}",
-                        f"click_element auf {selector[:60]}",
-                        "Seite hat reagiert",
-                    )
-                    audit(
-                        "vision_check",
-                        method="click_element",
-                        verdict=esc_decision.get("verdict"),
-                        page_state=esc_decision.get("page_state"),
-                    )
-                    if esc_decision.get("verdict") == "PROCEED":
+                    if await _verify_click_effect(before_url, before_title):
+                        audit("success", method="click_element", message="Klick bestätigt via DOM")
                         return True
                 continue
 
@@ -1854,18 +1970,8 @@ async def escalating_click(
                     audit("error", message=f"ghost_click failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    esc_decision = await _vision_gate_inside_escalation(
-                        f"after_ghost_click_{i}",
-                        f"ghost_click auf {sel[:60]}",
-                        "Seite hat reagiert",
-                    )
-                    audit(
-                        "vision_check",
-                        method="ghost_click",
-                        verdict=esc_decision.get("verdict"),
-                        page_state=esc_decision.get("page_state"),
-                    )
-                    if esc_decision.get("verdict") == "PROCEED":
+                    if await _verify_click_effect(before_url, before_title):
+                        audit("success", method="ghost_click", message="Klick bestätigt via DOM")
                         return True
                 continue
 
@@ -1891,33 +1997,13 @@ async def escalating_click(
                 await asyncio.sleep(0.3)
                 await keyboard_action(["Enter"], selector=sel)
                 await asyncio.sleep(0.8)
-                esc_decision = await _vision_gate_inside_escalation(
-                    f"after_keyboard_enter_{i}",
-                    f"keyboard Enter auf {sel[:60]}",
-                    "Seite hat reagiert",
-                )
-                audit(
-                    "vision_check",
-                    method="keyboard_enter",
-                    verdict=esc_decision.get("verdict"),
-                    page_state=esc_decision.get("page_state"),
-                )
-                if esc_decision.get("verdict") == "PROCEED":
+                if await _verify_click_effect(before_url, before_title):
+                    audit("success", method="keyboard_enter", message="Enter bestätigt via DOM")
                     return True
                 await keyboard_action(["Space"], selector=sel)
                 await asyncio.sleep(0.8)
-                esc_decision2 = await _vision_gate_inside_escalation(
-                    f"after_keyboard_space_{i}",
-                    f"keyboard Space auf {sel[:60]}",
-                    "Seite hat reagiert",
-                )
-                audit(
-                    "vision_check",
-                    method="keyboard_space",
-                    verdict=esc_decision2.get("verdict"),
-                    page_state=esc_decision2.get("page_state"),
-                )
-                if esc_decision2.get("verdict") == "PROCEED":
+                if await _verify_click_effect(before_url, before_title):
+                    audit("success", method="keyboard_space", message="Space bestätigt via DOM")
                     return True
                 continue
 
@@ -1927,18 +2013,8 @@ async def escalating_click(
                     audit("error", message=f"vision_click failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    esc_decision = await _vision_gate_inside_escalation(
-                        f"after_vision_click_{i}",
-                        f"vision_click '{description[:40]}'",
-                        "Seite hat reagiert",
-                    )
-                    audit(
-                        "vision_check",
-                        method="vision_click",
-                        verdict=esc_decision.get("verdict"),
-                        page_state=esc_decision.get("page_state"),
-                    )
-                    if esc_decision.get("verdict") == "PROCEED":
+                    if await _verify_click_effect(before_url, before_title):
+                        audit("success", method="vision_click", message="Klick bestätigt via DOM")
                         return True
                 continue
 
@@ -1969,18 +2045,8 @@ async def escalating_click(
                     audit("error", message=f"coord_click failed: {result}")
                 else:
                     await asyncio.sleep(0.8)
-                    esc_decision = await _vision_gate_inside_escalation(
-                        f"after_coord_click_{i}",
-                        f"coord_click ({cx},{cy})",
-                        "Seite hat reagiert",
-                    )
-                    audit(
-                        "vision_check",
-                        method="coord_click",
-                        verdict=esc_decision.get("verdict"),
-                        page_state=esc_decision.get("page_state"),
-                    )
-                    if esc_decision.get("verdict") == "PROCEED":
+                    if await _verify_click_effect(before_url, before_title):
+                        audit("success", method="coord_click", message="Coord-Klick bestätigt via DOM")
                         return True
                 continue
 
@@ -2068,9 +2134,14 @@ class VisionGateController:
         self.consecutive_retries = 0
         self.no_progress_count = 0
         self.last_screenshot_hash = None
-        self.failed_selectors = set()
+        # failed_selectors jetzt als dict {selector: fail_count} statt set().
+        # WHY: Ein Selektor der auf Seite A scheitert kann auf Seite B funktionieren.
+        # Wir lassen ihn nach 3 Fails global sperren, und resetten bei page_state change.
+        self.failed_selectors: dict[str, int] = {}
         self.last_page_state = None
         self.successful_actions = 0
+        # Reset-Tracking
+        self.last_url = None
 
     def should_continue(self) -> bool:
         """Prüft ob der Worker weitermachen darf."""
@@ -2120,10 +2191,21 @@ class VisionGateController:
             self.no_progress_count = 0
             self.last_screenshot_hash = screenshot_hash
 
-        # Page-State-Tracking
+        # Page-State-Tracking — bei State-Wechsel `failed_selectors` zurücksetzen
+        # WHY: Ein Selektor der auf dem Login-Screen fehlschlägt, kann auf dem
+        #      Dashboard völlig legitim sein. Ohne Reset sperren wir uns selbst aus.
         if page_state:
             if page_state != self.last_page_state:
                 audit("state_change", old=self.last_page_state, new=page_state)
+                if self.failed_selectors:
+                    audit(
+                        "state_change",
+                        message=f"Page-State change → failed_selectors reset ({len(self.failed_selectors)} Einträge)",
+                    )
+                    self.failed_selectors = {}
+                # Captcha-Retry-Counter bei State-Wechsel ebenfalls resetten
+                global _captcha_attempt_count
+                _captcha_attempt_count = 0
             self.last_page_state = page_state
 
         # Erfolgs-Tracking
@@ -2131,13 +2213,13 @@ class VisionGateController:
             self.successful_actions += 1
 
     def add_failed_selector(self, selector: str):
-        """Merkt sich einen fehlgeschlagenen Selektor um ihn nicht nochmal zu versuchen."""
+        """Merkt sich einen fehlgeschlagenen Selektor. Erst nach 3 Fails gesperrt."""
         if selector:
-            self.failed_selectors.add(selector)
+            self.failed_selectors[selector] = self.failed_selectors.get(selector, 0) + 1
 
     def is_selector_failed(self, selector: str) -> bool:
-        """Prüft ob ein Selektor bereits fehlgeschlagen ist."""
-        return selector in self.failed_selectors
+        """Ein Selektor gilt erst nach 3 Fehlversuchen als dauerhaft tot."""
+        return self.failed_selectors.get(selector, 0) >= 3
 
     def mark_dom_progress(self):
         """
@@ -2344,9 +2426,16 @@ async def main():
             await human_delay(2.0, 4.0)
             continue
 
-        # THROTTLE: Vor Vision-Calls länger warten um Rate-Limit zu vermeiden
-        # WHY: Antigravity hat Rate-Limits; zu schnelle Calls führen zu leeren Antworten.
-        await human_delay(5.0, 10.0)
+        # THROTTLE: Minimale Pause vor Vision-Call, adaptiv steigend bei Retries.
+        # WHY: Der alte Fix-Delay von 5-10s pro Schritt machte jeden Lauf 10-20 Min
+        # lang. Bei 120 Schritten addiert sich das zu >20 Min Leerlauf.
+        # STRATEGIE: Standard 1.0-2.5s; bei aufeinanderfolgenden RETRYs steigt der
+        # Delay exponentiell (Backoff) um echte Rate-Limits zu entspannen.
+        if gate.consecutive_retries >= 2:
+            backoff = min(2.0 ** gate.consecutive_retries, 20.0)
+            await human_delay(backoff, backoff + 2.0)
+        else:
+            await human_delay(1.0, 2.5)
 
         # ---- VISION CHECK ----
         decision = await ask_vision(
@@ -2376,33 +2465,61 @@ async def main():
         )
         print(f"{'=' * 60}\n")
 
-        # ---- CAPTCHA ERKENNUNG UND BEHANDLUNG (NEU in v3.1) ----
-        captcha_detected = await detect_captcha_page()
-        if captcha_detected:
-            audit("captcha", message="Captcha erkannt! Versuche Auto-Bypass...")
-            captcha_ok = await handle_captcha()
-            if captcha_ok:
-                audit("success", message="Captcha erfolgreich behandelt!")
-                await human_delay(2.0, 4.0)
-                continue
-            else:
-                audit(
-                    "error",
-                    message="Captcha-Bypass fehlgeschlagen — Vision kann helfen",
-                )
+        # ---- CAPTCHA ERKENNUNG UND BEHANDLUNG (optimiert in v3.2) ----
+        # WHY: Früher lief detect_captcha_page() bei JEDEM Schritt (= 120x zusätzliche
+        # Bridge-Calls). Jetzt triggert das nur noch wenn Vision explizit "captcha"
+        # als page_state meldet ODER wenn wir mehrfach RETRY bekommen haben ohne
+        # Fortschritt (= potentielle Blockade). Das spart viele Bridge-Calls pro Lauf.
+        should_check_captcha = page_state == "captcha" or (
+            gate.consecutive_retries >= 2 and page_state in ("unknown", "error")
+        )
+        if should_check_captcha:
+            captcha_detected = await detect_captcha_page()
+            if captcha_detected:
+                audit("captcha", message="Captcha erkannt! Versuche Auto-Bypass...")
+                captcha_ok = await handle_captcha()
+                if captcha_ok:
+                    audit("success", message="Captcha erfolgreich behandelt!")
+                    await human_delay(2.0, 4.0)
+                    continue
+                else:
+                    audit(
+                        "error",
+                        message="Captcha-Bypass fehlgeschlagen — Vision kann helfen",
+                    )
 
-        # ---- SURVEY ABSCHLUSS-GARANTIE (NEU in v3.1) ----
-        # Wenn page_state="survey_active" und Vision sagt STOP oder none:
-        # → Survey läuft noch! Niemals abbrechen! Retry zwingend!
-        if page_state == "survey_active" and verdict in ("STOP", "none"):
+        # ---- SURVEY ABSCHLUSS-GARANTIE (NEU in v3.1, gefixt in v3.2) ----
+        # Wenn page_state="survey_active" und Vision sagt STOP oder next=none:
+        # → Survey läuft noch! Niemals abbrechen! Aber statt einem leeren click_ref
+        #   (das tat nichts) forcieren wir jetzt eine *sinnvolle* Fallback-Aktion:
+        #   Zuerst versuchen wir einen DOM-basierten "Weiter/Nächste/Continue"-Klick
+        #   direkt hier, dann Scroll-Down um neue Fragen sichtbar zu machen.
+        if page_state == "survey_active" and (
+            verdict in ("STOP",) or next_action in ("none", "")
+        ):
             audit(
                 "warning",
-                message="SURVEY ABSCHLUSS-GARANTIE: survey_active aber Vision will stoppen → Ignoriert! Survey MUSS fertig werden!",
+                message="SURVEY ABSCHLUSS-GARANTIE: survey_active aber Vision will stoppen → Ignoriert! Suche Weiter-Button im DOM.",
             )
+            forced_click = False
+            for hint in ("Nächste", "Weiter", "Continue", "Next", "Submit", "Fertig", "Absenden"):
+                try:
+                    res = await click_visible_button_with_text(hint)
+                    if isinstance(res, dict) and res.get("result", {}).get("clicked"):
+                        audit("success", message=f"Weiter-Button via DOM-Fallback geklickt: '{hint}'")
+                        forced_click = True
+                        break
+                except Exception:
+                    continue
+            if forced_click:
+                # Klick erfolgt, warten und im nächsten Iteration weitermachen
+                await human_delay(1.0, 2.5)
+                continue
+            # Sonst: Scroll als harmloser Fallback, niemals STOP im aktiven Survey
             verdict = "PROCEED"
             decision["verdict"] = "PROCEED"
-            decision["next_action"] = "click_ref"
-            next_action = "click_ref"
+            decision["next_action"] = "scroll_down"
+            next_action = "scroll_down"
             next_params = {}
 
         # ---- STOP ----
@@ -2416,6 +2533,18 @@ async def main():
             # Bei RETRY den Selektor als fehlgeschlagen merken
             if next_params.get("selector"):
                 gate.add_failed_selector(next_params["selector"])
+            # UNSTICK: Nach 3 RETRYs in Folge erzwingen wir einen Scroll um neue
+            # Elemente in den Viewport zu bringen. Oft hängt Vision weil der
+            # Weiter-Button unter dem Fold ist und nicht im Screenshot sichtbar.
+            if gate.consecutive_retries >= 3:
+                audit(
+                    "state_change",
+                    message=f"UNSTICK: {gate.consecutive_retries} RETRYs in Folge → erzwinge scroll_down",
+                )
+                try:
+                    await handle_scroll("scroll_down")
+                except Exception:
+                    pass
             await human_delay(2.0, 4.0)
             continue
 

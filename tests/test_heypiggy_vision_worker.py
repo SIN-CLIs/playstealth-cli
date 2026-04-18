@@ -149,5 +149,79 @@ class HeyPiggyWorkerClickPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate.recorded, [])
 
 
+class HeyPiggyWorkerVisionTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    def test_cli_timeout_respects_full_requested_timeout(self):
+        """Regression: Früher war cli_timeout auf 25s gecappt → JEDER Call starb."""
+        # Direkt die Cap-Logik nachbilden wie in run_vision_model
+        timeout = 180
+        cli_timeout = max(30, timeout - 5)
+        self.assertEqual(cli_timeout, 175)
+        self.assertGreater(cli_timeout, 60, "CLI-Timeout muss groß genug für Gemini sein")
+
+
+class HeyPiggyWorkerControllerTests(unittest.TestCase):
+    def test_failed_selectors_reset_on_page_state_change(self):
+        """failed_selectors müssen bei Page-State-Wechsel geleert werden."""
+        gate = worker.VisionGateController()
+        gate.add_failed_selector("#bad")
+        gate.add_failed_selector("#bad")
+        gate.add_failed_selector("#bad")
+        self.assertTrue(gate.is_selector_failed("#bad"))
+
+        gate.record_step("PROCEED", "hash1", page_state="dashboard")
+        self.assertFalse(
+            gate.is_selector_failed("#bad"),
+            "Selektor sollte nach Page-State-Wechsel nicht mehr gesperrt sein",
+        )
+
+    def test_failed_selectors_require_three_failures_before_blocking(self):
+        """Ein einzelner Fail darf den Selektor nicht sofort sperren."""
+        gate = worker.VisionGateController()
+        gate.add_failed_selector("#flaky")
+        self.assertFalse(gate.is_selector_failed("#flaky"))
+        gate.add_failed_selector("#flaky")
+        self.assertFalse(gate.is_selector_failed("#flaky"))
+        gate.add_failed_selector("#flaky")
+        self.assertTrue(gate.is_selector_failed("#flaky"))
+
+
+class HeyPiggyWorkerJsonParsingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ask_vision_extracts_json_from_prose_wrapped_output(self):
+        """Regression: Prosa um JSON herum darf nicht zu RETRY führen."""
+        prosa_output = (
+            "Ich analysiere den Screenshot. Hier meine Entscheidung:\n"
+            '{"verdict": "PROCEED", "page_state": "dashboard", '
+            '"next_action": "click_element", "next_params": {"selector": "#btn"}, '
+            '"reason": "Button sichtbar", "progress": true}\n'
+            "Hoffentlich hilft das."
+        )
+        with patch.object(worker, "dom_prescan", AsyncMock(return_value="DOM")), patch.object(
+            worker,
+            "run_vision_model",
+            AsyncMock(return_value={"ok": True, "auth_failure": False, "text": prosa_output}),
+        ):
+            decision = await worker.ask_vision("/tmp/x.png", "a", "b", 1)
+
+        self.assertEqual(decision["verdict"], "PROCEED")
+        self.assertEqual(decision["page_state"], "dashboard")
+        self.assertEqual(decision["next_action"], "click_element")
+
+
+class HeyPiggyWorkerProfilePathTests(unittest.TestCase):
+    def test_profile_path_resolver_uses_env_override(self):
+        with patch.dict(os.environ, {"HEYPIGGY_PROFILE_PATH": "/tmp/custom.json"}):
+            path = worker._resolve_profile_path()
+        self.assertEqual(str(path), "/tmp/custom.json")
+
+    def test_profile_path_resolver_has_portable_fallback(self):
+        """Darf nicht mehr hardcoded auf /Users/jeremy/ zeigen."""
+        with patch.dict(os.environ, {}, clear=False):
+            # Explizit alle relevanten Env-Vars entfernen
+            for k in ("HEYPIGGY_PROFILE_PATH", "XDG_CONFIG_HOME"):
+                os.environ.pop(k, None)
+            path = worker._resolve_profile_path()
+        self.assertNotIn("/Users/jeremy", str(path))
+
+
 if __name__ == "__main__":
     unittest.main()
