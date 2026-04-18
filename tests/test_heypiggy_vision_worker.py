@@ -1,6 +1,9 @@
+import base64
 import importlib.util
+import json
 import os
 import pathlib
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -221,6 +224,164 @@ class HeyPiggyWorkerProfilePathTests(unittest.TestCase):
                 os.environ.pop(k, None)
             path = worker._resolve_profile_path()
         self.assertNotIn("/Users/jeremy", str(path))
+
+
+# Minimal gültiges 1x1 PNG für NVIDIA-NIM-Tests
+_TEST_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5wZuoAAAAASUVORK5CYII="
+)
+
+
+def _write_test_png() -> str:
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tmp.write(_TEST_PNG_BYTES)
+    tmp.close()
+    return tmp.name
+
+
+class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nvidia_nim_returns_auth_failure_without_key(self):
+        """Ohne NVIDIA_API_KEY → klarer Auth-Failure, kein Crash."""
+        with patch.object(worker, "NVIDIA_API_KEY", ""):
+            result = await worker._nvidia_nim_chat(
+                "test",
+                "/tmp/nonexistent.png",
+                timeout=5,
+                model="meta/llama-3.2-90b-vision-instruct",
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["auth_failure"])
+        self.assertIn("NVIDIA_API_KEY", result["error"])
+
+    async def test_nvidia_nim_parses_openai_compat_response(self):
+        """NVIDIA NIM OpenAI-kompatible Response wird korrekt geparst."""
+        tmp_path = _write_test_png()
+        fake_response = json.dumps({
+            "id": "cmpl-test",
+            "model": "meta/llama-3.2-90b-vision-instruct",
+            "choices": [{
+                "message": {
+                    "content": '{"verdict":"PROCEED","page_state":"dashboard","next_action":"click_element","next_params":{"selector":"#btn"},"reason":"test","progress":true}',
+                    "role": "assistant",
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"total_tokens": 150},
+        })
+
+        with patch.object(worker, "NVIDIA_API_KEY", "nvapi-test"), patch(
+            "asyncio.to_thread", new=AsyncMock(return_value=(200, fake_response, ""))
+        ):
+            result = await worker._nvidia_nim_chat(
+                "test prompt",
+                tmp_path,
+                timeout=30,
+                model="meta/llama-3.2-90b-vision-instruct",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["auth_failure"])
+        self.assertIn("PROCEED", result["text"])
+        self.assertEqual(result["model_used"], "meta/llama-3.2-90b-vision-instruct")
+
+    async def test_nvidia_nim_handles_rate_limit_429(self):
+        """429 Rate-Limit wird als retry-bar markiert, nicht als auth failure."""
+        tmp_path = _write_test_png()
+
+        with patch.object(worker, "NVIDIA_API_KEY", "nvapi-test"), patch(
+            "asyncio.to_thread", new=AsyncMock(return_value=(429, "", "rate limit"))
+        ):
+            result = await worker._nvidia_nim_chat(
+                "test",
+                tmp_path,
+                timeout=5,
+                model="meta/llama-3.2-90b-vision-instruct",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["auth_failure"])
+        self.assertTrue(result.get("rate_limited"))
+
+    async def test_nvidia_nim_handles_401_as_auth_failure(self):
+        """401 → auth_failure=True (Preflight stoppt Worker)."""
+        tmp_path = _write_test_png()
+        with patch.object(worker, "NVIDIA_API_KEY", "nvapi-bad"), patch(
+            "asyncio.to_thread", new=AsyncMock(return_value=(401, "", "invalid key"))
+        ):
+            result = await worker._nvidia_nim_chat(
+                "test",
+                tmp_path,
+                timeout=5,
+                model="meta/llama-3.2-90b-vision-instruct",
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["auth_failure"])
+
+    async def test_run_vision_model_routes_to_nvidia_when_key_present(self):
+        """Mit NVIDIA_API_KEY + VISION_BACKEND=auto → NVIDIA-Pfad wird gewählt."""
+        fake_nvidia = AsyncMock(
+            return_value={
+                "ok": True, "auth_failure": False,
+                "text": '{"verdict":"PROCEED"}',
+                "stdout_text": "", "stderr_text": "", "returncode": 200,
+            }
+        )
+        fake_opencode = AsyncMock(
+            return_value={"ok": False, "auth_failure": True, "error": "should not be called"}
+        )
+        with patch.object(worker, "NVIDIA_API_KEY", "nvapi-test"), patch.object(
+            worker, "VISION_BACKEND", "auto"
+        ), patch.object(worker, "_run_vision_nvidia", fake_nvidia), patch.object(
+            worker, "_run_vision_opencode", fake_opencode
+        ):
+            result = await worker.run_vision_model(
+                "prompt", "/tmp/x.png", timeout=30, step_num=1
+            )
+        self.assertTrue(result["ok"])
+        fake_nvidia.assert_awaited_once()
+        fake_opencode.assert_not_called()
+
+    async def test_run_vision_model_fallback_to_opencode_without_key(self):
+        """Ohne NVIDIA_API_KEY → OpenCode CLI Pfad (Backwards Compat)."""
+        fake_nvidia = AsyncMock(return_value={"ok": True, "text": "X"})
+        fake_opencode = AsyncMock(
+            return_value={"ok": True, "auth_failure": False, "text": "opencode-worked"}
+        )
+        with patch.object(worker, "NVIDIA_API_KEY", ""), patch.object(
+            worker, "VISION_BACKEND", "opencode"
+        ), patch.object(worker, "_run_vision_nvidia", fake_nvidia), patch.object(
+            worker, "_run_vision_opencode", fake_opencode
+        ):
+            result = await worker.run_vision_model(
+                "prompt", "/tmp/x.png", timeout=30, step_num=1
+            )
+        self.assertEqual(result["text"], "opencode-worked")
+        fake_opencode.assert_awaited_once()
+        fake_nvidia.assert_not_called()
+
+    async def test_nvidia_fallback_chain_tries_next_model_on_error(self):
+        """Wenn das Primary-Modell 500ert, wird das nächste Modell probiert."""
+        tmp_path = _write_test_png()
+        calls = []
+
+        async def fake_chat(prompt, path, *, timeout, model, force_json=True):
+            calls.append(model)
+            if model == worker.NVIDIA_VISION_MODEL:
+                return {"ok": False, "auth_failure": False, "error": "HTTP 500"}
+            return {
+                "ok": True, "auth_failure": False,
+                "text": '{"verdict":"PROCEED"}',
+                "stdout_text": "", "stderr_text": "", "returncode": 200,
+            }
+
+        with patch.object(worker, "_nvidia_nim_chat", side_effect=fake_chat):
+            result = await worker._run_vision_nvidia(
+                "test", tmp_path, timeout=30, step_num=1, purpose="vision"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(len(calls), 2, "Fallback-Modell muss probiert werden")
+        self.assertEqual(calls[0], worker.NVIDIA_VISION_MODEL)
 
 
 if __name__ == "__main__":

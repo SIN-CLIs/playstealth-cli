@@ -205,7 +205,51 @@ MAX_RETRIES = 5
 #   Außerdem wird no_progress_count bei page_state='survey_active' NICHT hochgezählt.
 MAX_NO_PROGRESS = 15
 MAX_CLICK_ESCALATIONS = 5  # 5 Klick-Methoden bevor aufgegeben wird
-VISION_MODEL = "google/antigravity-gemini-3-flash"
+
+# ============================================================================
+# VISION BACKEND (v3.2 PRO — NVIDIA NIM direct)
+# ============================================================================
+# STRATEGIE: Statt über OpenCode CLI (`opencode run`) zu gehen, sprechen wir
+# NVIDIA NIM direkt via HTTPS an. Das hat massive Vorteile:
+#   - Kein Subprocess-Spawn (spart 2-5s pro Call)
+#   - Kein OpenCode-Token-Rotation-Chaos, keine Antigravity-OAuth-Probleme
+#   - Direktes asyncio-Timeout-Management
+#   - OpenAI-kompatibles JSON-Schema-Forcing via `response_format`
+#   - Free tier via NVIDIA_API_KEY (kein Antigravity-Account nötig)
+#
+# MODELL: meta/llama-3.2-90b-vision-instruct
+#   - 90B Params, 128k Context, Bild+Text input
+#   - Benchmarks: ChartQA 85.5, DocVQA 90.1, MMMU 60.3 — stärker als Gemini Flash
+#   - Free tier auf NVIDIA NIM (integrate.api.nvidia.com)
+#
+# FALLBACK: Wenn NVIDIA_API_KEY fehlt, nutzen wir weiterhin OpenCode CLI.
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "").strip()
+NVIDIA_NIM_BASE_URL = os.environ.get(
+    "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+).rstrip("/")
+NVIDIA_VISION_MODEL = os.environ.get(
+    "NVIDIA_VISION_MODEL", "meta/llama-3.2-90b-vision-instruct"
+)
+# Fallback-Kette: Primary → kleineres 11B Modell (schneller, free)
+NVIDIA_VISION_FALLBACKS = [
+    m.strip()
+    for m in os.environ.get(
+        "NVIDIA_VISION_FALLBACKS",
+        "meta/llama-3.2-11b-vision-instruct,nvidia/llama-3.1-nemotron-nano-vl-8b-v1",
+    ).split(",")
+    if m.strip()
+]
+# Max Bytes pro Base64-Image bei NVIDIA NIM inline (Policy-Limit ~180KB).
+# WHY: Darüber verlangt NVIDIA den Assets-API-Upload (mehrstufiger Flow).
+#      Wir prüfen & komprimieren proaktiv um keinen 400 zu kassieren.
+NVIDIA_NIM_MAX_IMAGE_BYTES = int(os.environ.get("NVIDIA_NIM_MAX_IMAGE_BYTES", "180000"))
+
+# Backward-Compat: Der OpenCode-CLI-Pfad bleibt als expliziter Fallback.
+VISION_MODEL = os.environ.get("VISION_MODEL", "google/antigravity-gemini-3-flash")
+# Welcher Backend zu verwenden: "nvidia" (default wenn Key da), "opencode", "auto".
+VISION_BACKEND = os.environ.get(
+    "VISION_BACKEND", "auto" if NVIDIA_API_KEY else "opencode"
+).lower()
 CLICK_ACTIONS = (
     "click_element",
     "click_ref",
@@ -442,6 +486,285 @@ def detect_vision_auth_failure(raw_text: str) -> str | None:
     return None
 
 
+def _downscale_png_if_needed(path: str, max_bytes: int) -> bytes:
+    """
+    Lädt eine PNG-Datei und verkleinert sie ggf. damit sie unter `max_bytes` passt.
+    WHY: NVIDIA NIM akzeptiert inline-base64-Bilder nur bis ~180KB. Browser-
+         Screenshots können 400KB+ sein → sofortiger 400-Fehler ohne Resize.
+    CONSEQUENCES: Nutzt Pillow wenn verfügbar (beste Qualität). Ohne Pillow wird
+                  das Bild unverändert zurückgegeben; NVIDIA wird bei >180KB ein
+                  Fehler werfen den wir abfangen und als "RETRY" behandeln.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    if len(raw) <= max_bytes:
+        return raw
+    try:
+        from PIL import Image  # type: ignore
+        from io import BytesIO
+
+        img = Image.open(BytesIO(raw))
+        # Iterativ runterskalieren bis unter Limit (max 4 Stufen)
+        scale = 0.75
+        for _ in range(5):
+            w, h = img.size
+            new = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            buf = BytesIO()
+            new.save(buf, format="PNG", optimize=True)
+            out = buf.getvalue()
+            if len(out) <= max_bytes:
+                return out
+            img = new
+            scale = 0.85
+        # JPEG als letzter Ausweg (kleinere Files, NVIDIA akzeptiert)
+        buf = BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=70, optimize=True)
+        return buf.getvalue()
+    except ImportError:
+        # Pillow nicht installiert: Rohbytes zurückgeben, NVIDIA wird evtl 400'en
+        # Wir loggen das einmalig damit Ops es sieht.
+        if not getattr(_downscale_png_if_needed, "_warned", False):
+            print(
+                "[VISION] HINWEIS: Pillow nicht installiert — große Screenshots "
+                "können NVIDIA NIM überschreiten. Installiere: pip install Pillow"
+            )
+            _downscale_png_if_needed._warned = True  # type: ignore[attr-defined]
+        return raw
+    except Exception as e:
+        print(f"[VISION] Downscale fehlgeschlagen: {e} — sende Original")
+        return raw
+
+
+async def _nvidia_nim_chat(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int,
+    model: str,
+    force_json: bool = True,
+) -> dict:
+    """
+    Direkter HTTP-Call gegen NVIDIA NIM `/chat/completions` (OpenAI-kompatibel).
+    WHY: Umgeht komplett die OpenCode-CLI (Subprocess, Token-Rotation, Timeouts).
+         Direkt, async, deterministisch — und meta/llama-3.2-90b-vision-instruct
+         ist auf Vision-Benchmarks (ChartQA, DocVQA, MMMU) Spitze unter free
+         Modellen.
+    CONSEQUENCES: Gibt dasselbe Response-Format wie run_vision_model zurück
+                  (ok/auth_failure/text/…) damit der Rest des Codes unverändert
+                  bleibt.
+    """
+    if not NVIDIA_API_KEY:
+        return {
+            "ok": False,
+            "auth_failure": True,
+            "error": "NVIDIA_API_KEY nicht gesetzt",
+            "stdout_text": "",
+            "stderr_text": "",
+            "returncode": None,
+        }
+
+    # Bild laden + ggf. komprimieren
+    try:
+        img_bytes = _downscale_png_if_needed(screenshot_path, NVIDIA_NIM_MAX_IMAGE_BYTES)
+    except Exception as e:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"Bild konnte nicht geladen werden: {e}",
+            "stdout_text": "",
+            "stderr_text": str(e),
+            "returncode": None,
+        }
+
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+    # Mime-Type erraten (PNG default, JPEG wenn klein-optimiert)
+    mime = "image/png"
+    if img_bytes[:2] == b"\xff\xd8":
+        mime = "image/jpeg"
+    data_url = f"data:{mime};base64,{b64}"
+
+    # WHY JSON-Mode: Llama neigt zu Prosa; wir zwingen via response_format strikt
+    # zu validem JSON. NVIDIA NIM unterstützt OpenAI's response_format={type:json_object}.
+    system_prompt = (
+        "Du bist ein präziser Browser-Automation-Agent. "
+        "Antworte AUSSCHLIESSLICH mit einem einzigen gültigen JSON-Objekt. "
+        "KEINE Prosa, KEINE Markdown-Blöcke, KEINE Erklärungen vor oder nach dem JSON. "
+        "Schlüssel: verdict, page_state, next_action, next_params, reason, progress."
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+        "temperature": 0.1,
+        "top_p": 0.95,
+        "max_tokens": 2048,
+        "stream": False,
+    }
+    if force_json:
+        payload["response_format"] = {"type": "json_object"}
+
+    body = json.dumps(payload).encode("utf-8")
+    url = f"{NVIDIA_NIM_BASE_URL}/chat/completions"
+
+    def _do_request() -> tuple[int, str, str]:
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace"), ""
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = ""
+            return e.code, "", err_body
+        except urllib.error.URLError as e:
+            return 0, "", f"URLError: {e.reason}"
+        except Exception as e:
+            return 0, "", f"Exception: {e}"
+
+    # Request in Thread um asyncio nicht zu blockieren
+    try:
+        status, body_text, err_text = await asyncio.wait_for(
+            asyncio.to_thread(_do_request), timeout=timeout + 3
+        )
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"NVIDIA NIM Timeout nach {timeout}s",
+            "stdout_text": "",
+            "stderr_text": "",
+            "returncode": None,
+        }
+
+    if status == 401 or status == 403:
+        return {
+            "ok": False,
+            "auth_failure": True,
+            "error": f"NVIDIA NIM auth failure ({status}): {err_text[:200]}",
+            "stdout_text": "",
+            "stderr_text": err_text,
+            "returncode": status,
+        }
+    if status == 429:
+        # Rate limit → nicht als auth failure, sondern als retry-bar
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"NVIDIA NIM rate limit (429): {err_text[:200]}",
+            "rate_limited": True,
+            "stdout_text": "",
+            "stderr_text": err_text,
+            "returncode": status,
+        }
+    if status != 200:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"NVIDIA NIM HTTP {status}: {err_text[:300] or body_text[:300]}",
+            "stdout_text": body_text,
+            "stderr_text": err_text,
+            "returncode": status,
+        }
+
+    try:
+        data = json.loads(body_text)
+        choices = data.get("choices", [])
+        if not choices:
+            return {
+                "ok": False,
+                "auth_failure": False,
+                "error": "NVIDIA NIM: keine choices im Response",
+                "stdout_text": body_text,
+                "stderr_text": "",
+                "returncode": status,
+            }
+        content = choices[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            # Manche NIM-Modelle streamen content als Liste von {type,text}
+            content = "".join(
+                c.get("text", "") for c in content if isinstance(c, dict)
+            )
+        return {
+            "ok": True,
+            "auth_failure": False,
+            "text": content or "",
+            "stdout_text": content or "",
+            "stderr_text": "",
+            "returncode": status,
+            "model_used": data.get("model", model),
+            "usage": data.get("usage", {}),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"NVIDIA NIM parse error: {e}",
+            "stdout_text": body_text,
+            "stderr_text": str(e),
+            "returncode": status,
+        }
+
+
+async def _run_vision_nvidia(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int,
+    step_num: int,
+    purpose: str,
+) -> dict:
+    """
+    Top-Level Wrapper: primäres Modell + Fallback-Kette bei Fehlern/Rate-Limits.
+    WHY: Wenn das 90B-Modell überlastet ist, ist das 11B immer noch stark genug
+         für Survey-Navigation und deutlich schneller.
+    """
+    models_to_try = [NVIDIA_VISION_MODEL] + NVIDIA_VISION_FALLBACKS
+    last_result: dict = {}
+    for i, model in enumerate(models_to_try):
+        if i > 0:
+            audit(
+                "vision_check",
+                step=step_num,
+                message=f"NVIDIA Fallback zu {model} (vorher: {last_result.get('error', '')[:80]})",
+            )
+        result = await _nvidia_nim_chat(
+            prompt,
+            screenshot_path,
+            timeout=timeout,
+            model=model,
+            force_json=True,
+        )
+        last_result = result
+        if result.get("ok"):
+            return result
+        # Bei Auth-Failure früh raus — bei allen anderen Fehlern nächstes Modell
+        if result.get("auth_failure"):
+            return result
+        # Bei Rate-Limit kleinen Jitter bevor wir das nächste Modell probieren
+        if result.get("rate_limited"):
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+    return last_result
+
+
 async def run_vision_model(
     prompt: str,
     screenshot_path: str,
@@ -451,10 +774,43 @@ async def run_vision_model(
     purpose: str = "vision",
 ) -> dict:
     """
-    Führt einen screenshot-basierten OpenSIN-Vision-Call über `opencode run` aus.
-    WHY: Preflight-Probe und reguläre Vision-Entscheidungen müssen denselben CLI-Pfad
+    Haupteinstieg für Vision-Calls. Wählt automatisch zwischen:
+      - NVIDIA NIM direkt (bevorzugt wenn NVIDIA_API_KEY + VISION_BACKEND='nvidia'|'auto')
+      - OpenCode CLI (Fallback / legacy Pfad)
+    WHY: Preflight-Probe und reguläre Vision-Entscheidungen müssen denselben Pfad
     nutzen, damit Auth-Fehler zentral erkannt und fail-closed behandelt werden.
     CONSEQUENCES: Gibt strukturierte Resultate mit `ok` und `auth_failure` zurück.
+    """
+    # --- NVIDIA NIM Pfad ---
+    if VISION_BACKEND in ("nvidia", "auto") and NVIDIA_API_KEY:
+        return await _run_vision_nvidia(
+            prompt,
+            screenshot_path,
+            timeout=timeout,
+            step_num=step_num,
+            purpose=purpose,
+        )
+    # --- OpenCode CLI Pfad (legacy) ---
+    return await _run_vision_opencode(
+        prompt,
+        screenshot_path,
+        timeout=timeout,
+        step_num=step_num,
+        purpose=purpose,
+    )
+
+
+async def _run_vision_opencode(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int = 120,
+    step_num: int = 0,
+    purpose: str = "vision",
+) -> dict:
+    """
+    Legacy-Pfad: screenshot-basierter OpenSIN-Vision-Call über `opencode run`.
+    WHY: Bleibt erhalten als Fallback wenn NVIDIA_API_KEY nicht gesetzt ist.
     """
     # FIX: Früher wurde cli_timeout auf 25s gecappt (max(15, min(timeout, 25))).
     # Das war der Hauptgrund warum JEDER Vision-Call starb — Gemini 3 Flash braucht
@@ -1448,7 +1804,9 @@ async def ask_vision(
     screenshot_path: str, action_desc: str, expected: str, step_num: int
 ):
     """
-    Sendet einen Screenshot + DOM-Kontext an Gemini 3 Flash.
+    Sendet einen Screenshot + DOM-Kontext an das konfigurierte Vision-Modell.
+    Standard-Backend: NVIDIA NIM `meta/llama-3.2-90b-vision-instruct` (free tier).
+    Fallback: OpenCode CLI mit Gemini 3 Flash (wenn NVIDIA_API_KEY fehlt).
     WHY: KEIN EINZIGER KLICK ohne dass das Vision-Modell den Bildschirm gesehen hat.
     CONSEQUENCES: Bei Parse-Fehler wird RETRY zurückgegeben (nie ein Crash).
     """
@@ -1461,6 +1819,7 @@ async def ask_vision(
     profile_context = _build_profile_context()
 
     prompt = f"""Du bist der Vision Gate Controller der OpenSIN-Bridge.
+Du siehst einen Browser-Screenshot PLUS DOM-Analyse und entscheidest die nächste Aktion.
 
 KONTEXT:
 - Letzte Aktion: '{action_desc}'
@@ -1573,7 +1932,20 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
   "progress": true,
   "next_action": "click_ref",
   "next_params": {{"ref": "@e9"}}
-}}"""
+}}
+
+BEISPIELE (für deine Orientierung):
+
+Beispiel 1 — Radio-Frage sichtbar:
+{{"verdict":"PROCEED","page_state":"survey_active","reason":"Radio-Frage 'Wie oft kaufst du online?' sichtbar, wähle mittlere Option @e12","progress":true,"next_action":"click_ref","next_params":{{"ref":"@e12"}}}}
+
+Beispiel 2 — Nach Radio-Klick, Weiter-Button sichtbar:
+{{"verdict":"PROCEED","page_state":"survey_active","reason":"Antwort gewählt, Weiter-Button #submit-button-cpx sichtbar","progress":true,"next_action":"click_element","next_params":{{"selector":"#submit-button-cpx"}}}}
+
+Beispiel 3 — Cookie-Banner blockiert:
+{{"verdict":"PROCEED","page_state":"dashboard","reason":"Cookie-Consent Banner blockiert UI, klicke 'Alle akzeptieren' @e3","progress":false,"next_action":"click_ref","next_params":{{"ref":"@e3"}}}}
+
+JETZT antworte. Gib AUSSCHLIESSLICH das JSON-Objekt aus. Beginne deine Antwort direkt mit `{{`."""
 
     run_result = await run_vision_model(
         prompt,
