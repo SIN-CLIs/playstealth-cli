@@ -1,0 +1,17 @@
+# HeyPiggy Vision Worker — Runtime Dependencies
+#
+# Diese Datei ist optional — der Worker läuft auch ohne externe Deps nur mit
+# der Python-Standardbibliothek. Pillow wird aber STARK empfohlen weil:
+#
+#   NVIDIA NIM akzeptiert inline-base64 Bilder nur bis ~180KB. Browser-
+#   Screenshots sind häufig 300-600KB → sofortiger HTTP 400 ohne Pillow.
+#   Mit Pillow werden Screenshots automatisch runterskaliert.
+#
+# Installation:
+#   pip install -r requirements.txt
+
+# Bild-Downscaling für NVIDIA NIM inline uploads.
+Pillow>=10.0.0
+
+# Alles andere (asyncio, json, urllib, hashlib, base64, etc.) ist in der
+# Python-Stdlib — keine weiteren Installationen nötig.
