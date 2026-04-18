@@ -220,9 +220,7 @@ class RunSummary:
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         _ = path.write_text(
-            json.dumps(
-                self.to_dict(include_steps=include_steps), indent=2, ensure_ascii=False
-            ),
+            json.dumps(self.to_dict(include_steps=include_steps), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -238,12 +236,8 @@ class RunSummary:
             f"   Schritte: {self.total_steps} (✅ {self.successful_steps} | 🔄 {self.retry_steps} | ❌ {self.failed_steps})"
         )
         print(f"   Erfolgsrate: {self.success_rate:.0%}")
-        print(
-            f"   Vision: {self.total_vision_calls} Calls, ⌀ {self.avg_vision_time:.1f}s"
-        )
-        print(
-            f"   Bridge: {self.total_bridge_calls} Calls, ⌀ {self.avg_bridge_time:.1f}s"
-        )
+        print(f"   Vision: {self.total_vision_calls} Calls, ⌀ {self.avg_vision_time:.1f}s")
+        print(f"   Bridge: {self.total_bridge_calls} Calls, ⌀ {self.avg_bridge_time:.1f}s")
         print(f"   Surveys abgeschlossen: {self.surveys_completed}")
         if self.captcha_encounters:
             print(f"   ⚠️ Captchas: {self.captcha_encounters}")

@@ -1,17 +1,23 @@
-# HeyPiggy Vision Worker — Runtime Dependencies
+# =============================================================================
+# HeyPiggy Vision Worker — Runtime Dependencies (pinned)
+# =============================================================================
 #
-# Diese Datei ist optional — der Worker läuft auch ohne externe Deps nur mit
-# der Python-Standardbibliothek. Pillow wird aber STARK empfohlen weil:
+# Source of truth: pyproject.toml.
+# This file exists for pip-based deployments (Docker, CI) that want a
+# reproducible, pinned install without reading PEP 621 metadata.
 #
-#   NVIDIA NIM akzeptiert inline-base64 Bilder nur bis ~180KB. Browser-
-#   Screenshots sind häufig 300-600KB → sofortiger HTTP 400 ohne Pillow.
-#   Mit Pillow werden Screenshots automatisch runterskaliert.
+# Keep in sync with [project.dependencies] in pyproject.toml.
 #
-# Installation:
+# Install:
 #   pip install -r requirements.txt
+# -----------------------------------------------------------------------------
 
-# Bild-Downscaling für NVIDIA NIM inline uploads.
-Pillow>=10.0.0
+# --- Core -------------------------------------------------------------------
 
-# Alles andere (asyncio, json, urllib, hashlib, base64, etc.) ist in der
-# Python-Stdlib — keine weiteren Installationen nötig.
+# Image downscaling for NVIDIA NIM inline uploads (hard ~180 KB limit).
+# Without Pillow the vision path produces HTTP 400 on large screenshots.
+Pillow==11.0.0
+
+# Structured JSON logging with contextvars + secret redaction.
+# Replaces print() everywhere in the worker/ package.
+structlog==24.4.0

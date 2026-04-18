@@ -1,0 +1,59 @@
+# -----------------------------------------------------------------------------
+# pre-commit hooks — mirror of the CI pipeline, scoped to the changed files.
+# Install with:   pre-commit install --install-hooks
+# Run on all:     pre-commit run --all-files
+# -----------------------------------------------------------------------------
+default_language_version:
+  python: python3.13
+
+repos:
+  # Hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: detect-private-key
+
+  # Lint + format
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  # Type check (worker/ only — legacy modules excluded in pyproject)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - structlog==24.4.0
+          - types-Pillow==10.2.0.20240822
+        args: ["--config-file=pyproject.toml"]
+        files: ^worker/
+
+  # Secrets
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ^(\.pcpm/|\.opencode/|package-lock\.json)
+
+  # Security linter
+  - repo: https://github.com/PyCQA/bandit
+    rev: "1.7.10"
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml", "-r", "worker"]
+        pass_filenames: false

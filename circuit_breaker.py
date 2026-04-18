@@ -153,8 +153,6 @@ class CircuitBreaker:
             "failure_threshold": self.failure_threshold,
             "recovery_timeout": self.recovery_timeout,
             "time_since_last_failure": (
-                round(time.time() - self.last_failure_time, 1)
-                if self.last_failure_time > 0
-                else 0
+                round(time.time() - self.last_failure_time, 1) if self.last_failure_time > 0 else 0
             ),
         }

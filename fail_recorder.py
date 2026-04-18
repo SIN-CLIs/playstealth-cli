@@ -99,9 +99,7 @@ class ScreenRingRecorder:
             try:
                 frame_bytes = await self._capture_frame()
                 if frame_bytes:
-                    self._frames.append(
-                        RecordedFrame(timestamp=time.time(), png_bytes=frame_bytes)
-                    )
+                    self._frames.append(RecordedFrame(timestamp=time.time(), png_bytes=frame_bytes))
                     self._consecutive_capture_fails = 0
                     # Alte Frames evicten — nur die letzten buffer_seconds behalten
                     cutoff = time.time() - self._buffer_seconds

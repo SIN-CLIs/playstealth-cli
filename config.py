@@ -173,24 +173,16 @@ def load_config_from_env() -> WorkerConfig:
             model=os.environ.get("VISION_MODEL", VisionConfig.model),
             max_steps=int(os.environ.get("MAX_STEPS", VisionConfig.max_steps)),
             max_retries=int(os.environ.get("MAX_RETRIES", VisionConfig.max_retries)),
-            max_no_progress=int(
-                os.environ.get("MAX_NO_PROGRESS", VisionConfig.max_no_progress)
-            ),
+            max_no_progress=int(os.environ.get("MAX_NO_PROGRESS", VisionConfig.max_no_progress)),
             max_click_escalations=int(
-                os.environ.get(
-                    "MAX_CLICK_ESCALATIONS", VisionConfig.max_click_escalations
-                )
+                os.environ.get("MAX_CLICK_ESCALATIONS", VisionConfig.max_click_escalations)
             ),
-            cli_timeout=int(
-                os.environ.get("VISION_CLI_TIMEOUT", VisionConfig.cli_timeout)
-            ),
+            cli_timeout=int(os.environ.get("VISION_CLI_TIMEOUT", VisionConfig.cli_timeout)),
         ),
         nvidia=NvidiaConfig(
             api_key=os.environ.get("NVIDIA_API_KEY", ""),
             base_url=os.environ.get("NVIDIA_NIM_BASE_URL", NvidiaConfig.base_url),
-            primary_model=os.environ.get(
-                "NVIDIA_PRIMARY_MODEL", NvidiaConfig.primary_model
-            ),
+            primary_model=os.environ.get("NVIDIA_PRIMARY_MODEL", NvidiaConfig.primary_model),
             fallback_models=fallback_models,
             timeout=int(os.environ.get("NVIDIA_TIMEOUT", NvidiaConfig.timeout)),
             max_inline_bytes=int(

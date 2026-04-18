@@ -1,4 +1,97 @@
+# -----------------------------------------------------------------------------
+# HeyPiggy Vision Worker — .gitignore
+# -----------------------------------------------------------------------------
+
+# --- Python --------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# --- Virtual envs --------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Tooling caches ------------------------------------------------------
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.cache/
+
+# --- Coverage ------------------------------------------------------------
+.coverage
+.coverage.*
+coverage.xml
+.coverage_html/
+htmlcov/
+nosetests.xml
+*.cover
+*.py,cover
+
+# --- IDE / editors -------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Secrets / env -------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# --- Runtime artifacts ---------------------------------------------------
+# Worker writes to /tmp/heypiggy_* in production — local dev may mirror.
+/tmp/heypiggy_*
+heypiggy_run_*/
+screenshots/
+audit/
+sessions/
+run_summary.json
+fail_report_*.md
+fail_analysis_*.json
+*.log
+
+# --- Docker --------------------------------------------------------------
+.docker/
+
+# --- Node / legacy v0 scaffolding ---------------------------------------
+node_modules/
+.next/
+
+# --- OS ------------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+
+# --- Misc ----------------------------------------------------------------
+*.bak
+*.tmp

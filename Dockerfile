@@ -1,19 +1,99 @@
-FROM node:22-slim AS builder
+# syntax=docker/dockerfile:1.7
+
+# =============================================================================
+# HeyPiggy Vision Worker — production container
+# =============================================================================
+# Multi-stage build:
+#   1) `builder` compiles wheels against a pinned requirements.txt.
+#   2) `runtime`  copies only the installed site-packages + source, runs as a
+#      non-root user, and exposes a Python-based healthcheck.
+#
+# Build:
+#   docker build -t heypiggy-worker:latest .
+#
+# Run (with env file):
+#   docker run --rm --env-file .env heypiggy-worker:latest
+# -----------------------------------------------------------------------------
+
+ARG PYTHON_VERSION=3.13
+
+# -----------------------------------------------------------------------------
+# Stage 1: builder
+# -----------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+WORKDIR /build
+
+# Build tools needed for Pillow on slim (libjpeg/libpng headers).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libjpeg-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install runtime dependencies into an isolated prefix so the runtime stage
+# can copy just the site-packages without build tooling.
+COPY requirements.txt ./
+RUN pip install --prefix=/install --no-deps --require-hashes=false \
+        -r requirements.txt \
+    || pip install --prefix=/install -r requirements.txt
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime
+# -----------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HEYPIGGY_LOG_FORMAT=json
+
+# Runtime-only native libs (no -dev, no compilers).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libjpeg62-turbo \
+        zlib1g \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user with stable UID/GID for volume permissions.
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --system --gid ${APP_GID} app \
+    && useradd  --system --uid ${APP_UID} --gid app --home /app --shell /usr/sbin/nologin app
+
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
 
-FROM node:22-slim AS runner
-WORKDIR /app
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package*.json ./
-RUN npm ci --only=production
+# Copy installed Python packages from builder.
+COPY --from=builder /install /usr/local
 
-# Health check
-HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"
+# Copy source. .dockerignore keeps this minimal.
+COPY --chown=app:app . /app
 
-EXPOSE 8000
-CMD ["node", "dist/src/cli.js", "serve-a2a"]
+# Drop root.
+USER app
+
+# Artifacts volume (mount a real volume in prod).
+VOLUME ["/tmp"]
+
+# Health: the worker has no HTTP server — we verify the package still imports.
+# Fails fast if Pillow/structlog or the worker package is broken.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import worker, PIL, structlog; print('ok')" || exit 1
+
+# PID 1 reaping + signal forwarding for graceful shutdown (SIGTERM).
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Default command: run the worker via the package entrypoint.
+# Override with `docker run ... python heypiggy_vision_worker.py` for the
+# legacy shim.
+CMD ["python", "-m", "worker"]

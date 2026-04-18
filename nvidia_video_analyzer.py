@@ -107,9 +107,7 @@ async def analyze_fail_multiframe(
         b64 = base64.b64encode(img_bytes).decode("ascii")
         # Mime-Type: JPEG wenn Pillow downscaled hat, sonst PNG
         mime = "image/jpeg" if img_bytes[:2] == b"\xff\xd8" else "image/png"
-        content.append(
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-        )
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
     payload = {
         "model": model,
@@ -178,9 +176,7 @@ async def analyze_fail_multiframe(
 
         raw_content = choices[0].get("message", {}).get("content", "")
         if isinstance(raw_content, list):
-            raw_content = "".join(
-                c.get("text", "") for c in raw_content if isinstance(c, dict)
-            )
+            raw_content = "".join(c.get("text", "") for c in raw_content if isinstance(c, dict))
 
         # JSON aus Content parsen (ggf. Regex-Fallback für Prosa-Wrapper)
         try:

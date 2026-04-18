@@ -1,0 +1,284 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "heypiggy-vision-worker"
+version = "2.0.0"
+description = "Autonomous HeyPiggy survey worker for the A2A-SIN platform."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "OpenSIN-AI" }]
+keywords = ["a2a", "agent", "worker", "vision", "automation"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = [
+  # Image downscaling for NVIDIA NIM inline uploads (~180 KB limit).
+  "Pillow>=10.0.0,<12.0.0",
+  # Structured JSON logging with contextvars + secret redaction.
+  "structlog>=24.1.0,<26.0.0",
+]
+
+[project.optional-dependencies]
+otel = [
+  "opentelemetry-api>=1.25.0,<2.0.0",
+  "opentelemetry-sdk>=1.25.0,<2.0.0",
+  "opentelemetry-exporter-otlp>=1.25.0,<2.0.0",
+]
+dev = [
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "bandit[toml]>=1.7.9",
+  "pre-commit>=3.8.0",
+  "detect-secrets>=1.5.0",
+  "pip-audit>=2.7.0",
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0",
+  "pytest-cov>=5.0.0",
+  "pytest-mock>=3.14.0",
+  "types-Pillow>=10.0.0",
+]
+
+[project.scripts]
+heypiggy-worker = "worker.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy"
+Source = "https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy"
+Issues = "https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy/issues"
+Changelog = "https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy/blob/main/CHANGELOG.md"
+
+# ---------------------------------------------------------------------------
+# setuptools: what we ship as the installable package
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+py-modules = [
+  "circuit_breaker",
+  "config",
+  "fail_recorder",
+  "fail_report",
+  "nvidia_video_analyzer",
+  "observability",
+  "state_machine",
+  "heypiggy_vision_worker",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["worker*"]
+exclude = ["tests*", "platforms*", "config*", "governance*"]
+
+# ---------------------------------------------------------------------------
+# Ruff: lint + format
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+  ".githooks",
+  "config",
+  "governance",
+  "platforms",
+  "n8n-workflows",
+  # Legacy test suite targets the monolith and is out-of-scope for strict linting.
+  "tests/test_circuit_breaker.py",
+  "tests/test_config.py",
+  "tests/test_fail_recorder.py",
+  "tests/test_fail_report.py",
+  "tests/test_heypiggy_vision_worker.py",
+  "tests/test_nvidia_video_analyzer.py",
+  "tests/test_observability.py",
+  "tests/test_state_machine.py",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "B",    # flake8-bugbear
+  "C4",   # flake8-comprehensions
+  "UP",   # pyupgrade
+  "SIM",  # flake8-simplify
+  "S",    # flake8-bandit (complements bandit)
+  "A",    # flake8-builtins
+  "PL",   # pylint
+  "PT",   # pytest-style
+  "RET",  # flake8-return
+  "TRY",  # tryceratops
+  "RUF",  # ruff-specific
+  "ASYNC",
+  "TID",  # tidy imports
+  "PIE",  # misc lints
+  "T20",  # no print() in library code
+  "N",    # pep8-naming
+  "D",    # pydocstyle
+  "ANN",  # flake8-annotations
+]
+ignore = [
+  "D105",    # magic-method docstrings are noise
+  "D107",    # __init__ docstrings covered by class docstring
+  "D203",    # conflicts with D211
+  "D213",    # conflicts with D212
+  "ANN101",  # deprecated, removed in ruff >=0.8
+  "ANN102",  # deprecated, removed in ruff >=0.8
+  "ANN401",  # allow Any in narrow contexts
+  "ASYNC109", # shutdown timeout arg is intentional
+  "PLR0913", # many args are unavoidable in orchestrators
+  "PLR0915", # many statements in orchestrators
+  "PLR2004", # magic values are fine in config-like code
+  "TRY003",  # long exception messages are ok
+  "S101",    # assert is fine in tests
+  "N818",    # some exceptions are legitimately not *Error
+]
+
+[tool.ruff.lint.per-file-ignores]
+# New code in worker/ is strict; everything below is out-of-scope for this refactor.
+"tests/**" = ["D", "ANN", "S", "PLR", "T20", "N802", "N803", "N806", "UP", "TRY", "RUF"]
+"worker/cli.py" = ["T20", "TRY400", "PLR0911"]  # CLI prints to stdout; explicit error codes
+# Legacy monolith + single-module helpers: flagged as out-of-scope in AGENTS.md.
+"heypiggy_vision_worker.py" = ["ALL"]
+"circuit_breaker.py" = ["ALL"]
+"observability.py" = ["ALL"]
+"fail_recorder.py" = ["ALL"]
+"fail_report.py" = ["ALL"]
+"nvidia_video_analyzer.py" = ["ALL"]
+"state_machine.py" = ["ALL"]
+"config.py" = ["ALL"]
+"scripts/**" = ["D", "ANN", "T20"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["worker"]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+# ---------------------------------------------------------------------------
+# Mypy: strict for new code
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_unreachable = true
+pretty = true
+show_error_codes = true
+show_column_numbers = true
+namespace_packages = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = "worker.*"
+disallow_untyped_defs = true
+disallow_untyped_calls = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+no_implicit_reexport = true
+
+[[tool.mypy.overrides]]
+# Legacy modules are not strict-typed (out of scope for this refactor).
+module = [
+  "circuit_breaker",
+  "config",
+  "fail_recorder",
+  "fail_report",
+  "heypiggy_vision_worker",
+  "nvidia_video_analyzer",
+  "observability",
+  "state_machine",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["PIL.*", "structlog.*", "opentelemetry.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--showlocals",
+  "--tb=short",
+  "--import-mode=importlib",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+  "error",
+  "ignore::DeprecationWarning:urllib3.*",
+  # Legacy code (config loader) leaks transient sockets during import; the
+  # warning is unraisable and surfaces out-of-order — ignore at suite level.
+  "ignore::pytest.PytestUnraisableExceptionWarning",
+]
+markers = [
+  "unit: fast unit tests with no I/O",
+  "integration: integration tests (may spawn subprocesses)",
+  "slow: tests that take >1s",
+]
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+source = ["worker"]
+omit = [
+  "worker/__main__.py",
+  "worker/telemetry.py",  # optional OTel integration, exercised only with extras
+  "tests/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+fail_under = 80
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+  "\\.\\.\\.",
+]
+
+[tool.coverage.html]
+directory = ".coverage_html"
+
+# ---------------------------------------------------------------------------
+# Bandit: security linter
+# ---------------------------------------------------------------------------
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "node_modules", "config", "governance"]
+skips = [
+  "B101",  # assert used — we allow asserts in library code
+  "B404",  # subprocess import — we need it for bridge tools
+]

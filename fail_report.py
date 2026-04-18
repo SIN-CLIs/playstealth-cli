@@ -174,8 +174,6 @@ def save_fail_report_to_disk(
 
     # Raw JSON
     json_path = out / f"fail_analysis_{run_id}.json"
-    json_path.write_text(
-        json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    json_path.write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return md_path
