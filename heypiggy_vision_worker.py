@@ -53,6 +53,18 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from circuit_breaker import CircuitBreaker
+from config import load_config_from_env
+from fail_recorder import ScreenRingRecorder, save_keyframes_to_disk
+from fail_report import (
+    generate_fail_report_markdown,
+    post_github_issue_comment,
+    save_fail_report_to_disk,
+    upload_to_box,
+)
+from nvidia_video_analyzer import analyze_fail_multiframe
+from observability import RunSummary
+
 # Import typed state machine for page state tracking
 from state_machine import page_state_machine
 
@@ -66,7 +78,18 @@ from state_machine import page_state_machine
 #               Umfragen brechen ab, Account könnte gesperrt werden.
 # ============================================================================
 
-PROFILE_PATH = Path("/Users/jeremy/.config/opencode/profiles/jeremy_schulze.json")
+
+def _resolve_profile_path() -> Path:
+    override = os.environ.get("HEYPIGGY_PROFILE_PATH")
+    if override:
+        return Path(override)
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home) / "opencode" / "profiles" / "jeremy_schulze.json"
+    return Path(".config") / "opencode" / "profiles" / "jeremy_schulze.json"
+
+
+PROFILE_PATH = _resolve_profile_path()
 
 
 def _load_user_profile() -> dict:
@@ -135,31 +158,32 @@ def _build_profile_context() -> str:
 # KONFIGURATION
 # ============================================================================
 
+WORKER_CONFIG = load_config_from_env()
+
 # Bridge-Endpunkte
-BRIDGE_MCP_URL = "https://openjerro-opensin-bridge-mcp.hf.space/mcp"
-BRIDGE_HEALTH_URL = "https://openjerro-opensin-bridge-mcp.hf.space/health"
+BRIDGE_MCP_URL = WORKER_CONFIG.bridge.mcp_url
+BRIDGE_HEALTH_URL = WORKER_CONFIG.bridge.health_url
+BRIDGE_CONNECT_TIMEOUT = WORKER_CONFIG.bridge.connect_timeout
 
 # Vision Gate Limits (aus AGENTS.md PRIORITY -7.0)
 # WHY MAX_STEPS=120: Umfragen haben oft 20-40 Fragen, jede Frage braucht
 #   Screenshot + Vision + Klick + DOM-Verify = 4 Aktionen. 40 Fragen * 4 = 160.
 #   120 ist ein sicherer Wert der auch lange Surveys komplett abschließt.
-MAX_STEPS = 120
+MAX_STEPS = WORKER_CONFIG.vision.max_steps
 # WHY MAX_RETRIES=5: 3 war zu aggressiv — manchmal braucht eine Seite länger zum laden.
-MAX_RETRIES = 5
+MAX_RETRIES = WORKER_CONFIG.vision.max_retries
 # WHY MAX_NO_PROGRESS=15: Survey-Seiten sehen Frage-für-Frage fast identisch aus.
 #   Screenshot-Hash-Vergleich erkennt das fälschlich als 'kein Fortschritt'.
 #   15 Schritte gibt dem Worker genug Spielraum um durch mehrseitige Surveys zu kommen.
 #   Außerdem wird no_progress_count bei page_state='survey_active' NICHT hochgezählt.
-MAX_NO_PROGRESS = 15
-MAX_CLICK_ESCALATIONS = 5  # 5 Klick-Methoden bevor aufgegeben wird
-VISION_MODEL = "google/antigravity-gemini-3-flash"
-CLICK_ACTIONS = (
-    "click_element",
-    "click_ref",
-    "ghost_click",
-    "vision_click",
-    "click_coordinates",
-)
+MAX_NO_PROGRESS = WORKER_CONFIG.vision.max_no_progress
+MAX_CLICK_ESCALATIONS = WORKER_CONFIG.vision.max_click_escalations
+VISION_MODEL = WORKER_CONFIG.vision.model
+CLICK_ACTIONS = WORKER_CONFIG.click_actions
+NVIDIA_API_KEY = WORKER_CONFIG.nvidia.api_key
+NVIDIA_VISION_MODEL = WORKER_CONFIG.nvidia.primary_model
+NVIDIA_FALLBACK_MODELS = WORKER_CONFIG.nvidia.fallback_models
+VISION_BACKEND = os.environ.get("VISION_BACKEND", "auto").lower()
 
 # 1x1 PNG als lokaler Vision-Probe. WHY: Die Preflight-Prüfung muss die
 # screenshot-basierte Vision-Authentifizierung testen, BEVOR irgendeine Browser-
@@ -169,15 +193,53 @@ VISION_AUTH_PROBE_PNG = base64.b64decode(
 )
 
 # Verzeichnisse für Artefakte
-RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
-ARTIFACT_DIR = Path(f"/tmp/heypiggy_run_{RUN_ID}")
-SCREENSHOT_DIR = ARTIFACT_DIR / "screenshots"
-AUDIT_DIR = ARTIFACT_DIR / "audit"
-SESSION_DIR = ARTIFACT_DIR / "sessions"
+RUN_ID = WORKER_CONFIG.artifacts.run_id
+ARTIFACT_DIR = WORKER_CONFIG.artifacts.artifact_dir
+SCREENSHOT_DIR = WORKER_CONFIG.artifacts.screenshot_dir
+AUDIT_DIR = WORKER_CONFIG.artifacts.audit_dir
+SESSION_DIR = WORKER_CONFIG.artifacts.session_dir
 
 # Erstelle alle Verzeichnisse beim Start
-for d in [ARTIFACT_DIR, SCREENSHOT_DIR, AUDIT_DIR, SESSION_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+WORKER_CONFIG.artifacts.ensure_dirs()
+
+CURRENT_RUN_SUMMARY: RunSummary | None = None
+VISION_CIRCUIT_BREAKER = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+_VISION_CACHE: dict[tuple[str, str], dict[str, object]] = {}
+FAIL_LEARNING_PATH = Path("/tmp/heypiggy_fail_learning.json")
+FAIL_KEYWORD_STOPWORDS = {
+    "after",
+    "before",
+    "button",
+    "click",
+    "cause",
+    "failed",
+    "failure",
+    "nicht",
+    "problem",
+    "seite",
+    "step",
+    "survey",
+    "that",
+    "the",
+    "this",
+    "under",
+    "unknown",
+    "visible",
+    "war",
+    "with",
+}
+FAIL_RUNTIME_KEYWORDS = {
+    "blocked",
+    "captcha",
+    "clickable",
+    "consent",
+    "cookie",
+    "fold",
+    "hidden",
+    "modal",
+    "overlay",
+    "popup",
+}
 
 # ============================================================================
 # ANSWER HISTORY — Konsistenz über alle Surveys hinweg (NEU in v3.1)
@@ -218,6 +280,407 @@ def get_consistent_answer(question):
         if question in answers:
             return answers[question]
     return None
+
+
+def load_fail_learning() -> dict[str, object]:
+    if FAIL_LEARNING_PATH.exists():
+        try:
+            with open(FAIL_LEARNING_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {
+        "recent_failures": [],
+        "issue_counts": {},
+        "denylist": {
+            "selectors": [],
+            "action_signatures": [],
+            "root_cause_keywords": [],
+        },
+    }
+
+
+def save_fail_learning(data: dict[str, object]) -> None:
+    FAIL_LEARNING_PATH.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _normalize_denylist_entries(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _extract_root_cause_keywords(root_cause: str) -> list[str]:
+    keywords: list[str] = []
+    for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{3,}", root_cause.lower()):
+        if token in FAIL_KEYWORD_STOPWORDS:
+            continue
+        if token not in keywords:
+            keywords.append(token)
+    return keywords[:8]
+
+
+def _build_action_signature(action: str, params: dict[str, object]) -> str:
+    return f"{action}|{json.dumps(params, sort_keys=True, ensure_ascii=False)}"
+
+
+def _extract_gate_action_signatures(gate) -> list[str]:
+    if gate is None or not hasattr(gate, "action_history"):
+        return []
+    signatures: list[str] = []
+    for item in list(getattr(gate, "action_history", []))[-3:]:
+        if not isinstance(item, tuple) or len(item) != 3:
+            continue
+        _, action, params_json = item
+        signatures.append(f"{action}|{params_json}")
+    return signatures
+
+
+def _get_fail_denylist() -> dict[str, list[str]]:
+    memory = load_fail_learning()
+    denylist = memory.get("denylist", {})
+    if not isinstance(denylist, dict):
+        return {"selectors": [], "action_signatures": [], "root_cause_keywords": []}
+    return {
+        "selectors": _normalize_denylist_entries(denylist.get("selectors", [])),
+        "action_signatures": _normalize_denylist_entries(
+            denylist.get("action_signatures", [])
+        ),
+        "root_cause_keywords": _normalize_denylist_entries(
+            denylist.get("root_cause_keywords", [])
+        ),
+    }
+
+
+def remember_fail_learning(
+    analysis: dict[str, object], exit_reason: str, final_page_state: str, gate=None
+) -> dict[str, object]:
+    memory = load_fail_learning()
+    recent_failures = list(memory.get("recent_failures", []))
+    issue_counts = dict(memory.get("issue_counts", {}))
+    denylist = _get_fail_denylist()
+
+    issue_flags = {
+        "captcha_detected": bool(analysis.get("captcha_detected")),
+        "timing_issue": bool(analysis.get("timing_issue")),
+        "selector_issue": bool(analysis.get("selector_issue")),
+        "loop_detected": bool(analysis.get("loop_detected")),
+    }
+    for key, enabled in issue_flags.items():
+        if enabled:
+            issue_counts[key] = int(issue_counts.get(key, 0)) + 1
+
+    selector_candidates = list(denylist["selectors"])
+    selector_candidates.extend(
+        _normalize_denylist_entries(analysis.get("bad_selectors", []))
+    )
+    if (
+        issue_flags["selector_issue"]
+        and gate is not None
+        and hasattr(gate, "failed_selectors")
+    ):
+        selector_candidates.extend(
+            str(selector)
+            for selector in list(getattr(gate, "failed_selectors", {}).keys())
+        )
+
+    action_signature_candidates = list(denylist["action_signatures"])
+    action_signature_candidates.extend(
+        _normalize_denylist_entries(analysis.get("bad_action_signatures", []))
+    )
+    if issue_flags["loop_detected"]:
+        action_signature_candidates.extend(_extract_gate_action_signatures(gate))
+
+    root_cause_text = str(analysis.get("root_cause", "Unbekannt"))
+    keyword_candidates = list(denylist["root_cause_keywords"])
+    keyword_candidates.extend(_extract_root_cause_keywords(root_cause_text))
+
+    recent_failures.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "exit_reason": exit_reason,
+            "page_state": final_page_state,
+            "root_cause": root_cause_text,
+            "fix_recommendation": str(analysis.get("fix_recommendation", "N/A")),
+            "affected_step": str(analysis.get("affected_step", "N/A")),
+            "issue_flags": issue_flags,
+        }
+    )
+
+    memory["recent_failures"] = recent_failures[-5:]
+    memory["issue_counts"] = issue_counts
+    memory["denylist"] = {
+        "selectors": _normalize_denylist_entries(selector_candidates)[-10:],
+        "action_signatures": _normalize_denylist_entries(action_signature_candidates)[
+            -10:
+        ],
+        "root_cause_keywords": _normalize_denylist_entries(keyword_candidates)[-12:],
+    }
+    save_fail_learning(memory)
+    return memory
+
+
+def build_fail_learning_context() -> str:
+    memory = load_fail_learning()
+    recent_failures = memory.get("recent_failures", [])
+    denylist = _get_fail_denylist()
+    if not isinstance(recent_failures, list) or not recent_failures:
+        return ""
+
+    last_failure = recent_failures[-1]
+    issue_counts = memory.get("issue_counts", {})
+    if not isinstance(last_failure, dict) or not isinstance(issue_counts, dict):
+        return ""
+
+    lines = ["RECENT FAIL-LEARNINGS (vermeide diese Muster aktiv):"]
+    lines.append(f"- Letzte Root Cause: {last_failure.get('root_cause', 'Unbekannt')}")
+    lines.append(
+        f"- Letzte Fix-Empfehlung: {last_failure.get('fix_recommendation', 'N/A')}"
+    )
+    lines.append(
+        f"- Letzter betroffener Schritt: {last_failure.get('affected_step', 'N/A')}"
+    )
+    lines.append("HARTE FAIL-LEARNING REGELN FÜR DIE NÄCHSTE ENTSCHEIDUNG:")
+    if int(issue_counts.get("timing_issue", 0)) > 0:
+        lines.append(
+            "- VERMEIDE Sofort-Wiederholungen nach Klicks; plane erst Sichtbarkeit/DOM-Änderung oder ein vorsichtiges Warten ein."
+        )
+    if int(issue_counts.get("selector_issue", 0)) > 0:
+        lines.append(
+            '- VERMEIDE next_action="click_element" mit generischen .class- oder tag-Selektoren; bevorzuge click_ref, #id + ghost_click oder vision_click.'
+        )
+    if int(issue_counts.get("loop_detected", 0)) > 0:
+        lines.append(
+            "- VERMEIDE dieselbe next_action mit denselben next_params auf demselben Screen; wenn unsicher, gib RETRY mit einer anderen Methode zurück."
+        )
+    if int(issue_counts.get("captcha_detected", 0)) > 0:
+        lines.append(
+            "- VERMEIDE Survey-Interaktionen solange Captcha/Blocker sichtbar sein könnte; priorisiere zuerst die Entblockung."
+        )
+    last_root_cause = str(last_failure.get("root_cause", ""))
+    if any(
+        hint in last_root_cause.lower()
+        for hint in ("not visible", "unter dem fold", "under the fold", "not clickable")
+    ):
+        lines.append(
+            "- Wenn ein Ziel vermutlich nicht sichtbar/klickbar ist, VERMEIDE blinde Standard-Klicks und bevorzuge scroll_down, ghost_click oder vision_click."
+        )
+    if denylist["selectors"]:
+        lines.append(
+            f"- HARTE SELECTOR-DENYLIST: {', '.join(denylist['selectors'][:4])}"
+        )
+    if denylist["action_signatures"]:
+        lines.append(
+            "- HARTE ACTION-DENYLIST: Wiederhole keine zuvor gescheiterten Action-Signaturen."
+        )
+    if denylist["root_cause_keywords"]:
+        lines.append(
+            f"- RISK KEYWORDS AUS FEHLSCHLÄGEN: {', '.join(denylist['root_cause_keywords'][:6])}"
+        )
+    return "\n".join(lines)
+
+
+def get_fail_learning_delay_bounds(
+    min_sec: float, max_sec: float
+) -> tuple[float, float]:
+    memory = load_fail_learning()
+    issue_counts = memory.get("issue_counts", {})
+    if isinstance(issue_counts, dict) and int(issue_counts.get("timing_issue", 0)) > 0:
+        return min_sec + 1.0, max_sec + 2.0
+    return min_sec, max_sec
+
+
+def get_fail_learning_dom_wait_seconds(default_seconds: float = 1.0) -> float:
+    memory = load_fail_learning()
+    issue_counts = memory.get("issue_counts", {})
+    if isinstance(issue_counts, dict) and int(issue_counts.get("timing_issue", 0)) > 0:
+        return default_seconds + 1.0
+    return default_seconds
+
+
+def _get_fail_issue_counts() -> dict[str, int]:
+    memory = load_fail_learning()
+    issue_counts = memory.get("issue_counts", {})
+    if not isinstance(issue_counts, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in issue_counts.items():
+        try:
+            out[str(key)] = int(value)
+        except Exception:
+            continue
+    return out
+
+
+def _is_fragile_cached_click(decision: dict[str, object]) -> bool:
+    next_action = str(decision.get("next_action", "none"))
+    if next_action != "click_element":
+        return False
+    raw_params = decision.get("next_params", {})
+    if not isinstance(raw_params, dict):
+        return False
+    selector = str(raw_params.get("selector", ""))
+    return bool(selector) and not selector.startswith("#")
+
+
+def _should_bypass_cached_decision(decision: dict[str, object]) -> bool:
+    issue_counts = _get_fail_issue_counts()
+    denylist = _get_fail_denylist()
+    raw_params = decision.get("next_params", {})
+    next_params = raw_params if isinstance(raw_params, dict) else {}
+    selector = str(next_params.get("selector", ""))
+    if selector and selector in denylist["selectors"]:
+        return True
+    if (
+        _build_action_signature(str(decision.get("next_action", "none")), next_params)
+        in denylist["action_signatures"]
+    ):
+        return True
+    if issue_counts.get("selector_issue", 0) > 0 and _is_fragile_cached_click(decision):
+        return True
+    if (
+        issue_counts.get("loop_detected", 0) > 0
+        and str(decision.get("next_action", "none")) in CLICK_ACTIONS
+    ):
+        return True
+    return False
+
+
+def _should_store_cached_decision(decision: dict[str, object]) -> bool:
+    if decision.get("verdict") != "PROCEED":
+        return False
+    if _should_bypass_cached_decision(decision):
+        return False
+    return True
+
+
+def apply_fail_learning_to_decision(
+    decision: dict[str, object],
+    gate,
+    screenshot_hash: str,
+) -> dict[str, object]:
+    next_action = str(decision.get("next_action", "none"))
+    raw_params = decision.get("next_params", {})
+    next_params = raw_params if isinstance(raw_params, dict) else {}
+    denylist = _get_fail_denylist()
+    selector = str(next_params.get("selector", ""))
+    action_signature = _build_action_signature(next_action, next_params)
+    reason_text = str(decision.get("reason", "")).lower()
+
+    memory = load_fail_learning()
+    issue_counts = memory.get("issue_counts", {})
+    selector_issues = 0
+    loop_issues = 0
+    if isinstance(issue_counts, dict):
+        selector_issues = int(issue_counts.get("selector_issue", 0))
+        loop_issues = int(issue_counts.get("loop_detected", 0))
+
+    adapted = dict(decision)
+    adapted["next_params"] = dict(next_params)
+
+    if selector and selector in denylist["selectors"]:
+        adapted["verdict"] = "RETRY"
+        adapted["next_action"] = "none"
+        adapted["next_params"] = {}
+        adapted["reason"] = f"Fail-learning denylist blockiert Selector: {selector}"
+        adapted["progress"] = False
+        audit(
+            "warning",
+            message="Fail-learning selector denylist aktiv",
+            selector=selector,
+        )
+        return adapted
+
+    if action_signature in denylist["action_signatures"]:
+        adapted["verdict"] = "RETRY"
+        adapted["next_action"] = "none"
+        adapted["next_params"] = {}
+        adapted["reason"] = (
+            f"Fail-learning denylist blockiert Action-Signatur: {next_action}"
+        )
+        adapted["progress"] = False
+        audit(
+            "warning", message="Fail-learning action denylist aktiv", action=next_action
+        )
+        return adapted
+
+    if (
+        next_action == "click_element"
+        and not str(next_params.get("selector", "")).startswith("#")
+        and any(keyword in reason_text for keyword in denylist["root_cause_keywords"])
+        and any(
+            keyword in FAIL_RUNTIME_KEYWORDS
+            for keyword in denylist["root_cause_keywords"]
+        )
+    ):
+        adapted["verdict"] = "RETRY"
+        adapted["next_action"] = "none"
+        adapted["next_params"] = {}
+        adapted["reason"] = (
+            "Fail-learning root-cause denylist blockiert fragilen Klick bei bekanntem Risiko"
+        )
+        adapted["progress"] = False
+        audit(
+            "warning",
+            message="Fail-learning keyword denylist aktiv",
+            action=next_action,
+        )
+        return adapted
+
+    if loop_issues > 0 and gate.record_action(
+        screenshot_hash, next_action, next_params
+    ):
+        adapted["verdict"] = "RETRY"
+        adapted["next_action"] = "none"
+        adapted["next_params"] = {}
+        adapted["reason"] = (
+            f"Fail-learning loop guard blockiert wiederholte Aktion: {next_action}"
+        )
+        adapted["progress"] = False
+        audit("warning", message="Fail-learning loop guard aktiv", action=next_action)
+        return adapted
+
+    if selector_issues <= 0 or next_action != "click_element":
+        return adapted
+
+    selector = str(next_params.get("selector", ""))
+    ref = str(next_params.get("ref", ""))
+    description = str(next_params.get("description", ""))
+
+    if ref:
+        adapted["next_action"] = "click_ref"
+        adapted["next_params"] = {"ref": ref}
+        adapted["reason"] = (
+            f"{adapted.get('reason', '')} | Fail-learning bevorzugt click_ref nach Selector-Fails"
+        ).strip(" |")
+        return adapted
+
+    if selector.startswith("#"):
+        adapted["next_action"] = "ghost_click"
+        adapted["next_params"] = {"selector": selector}
+        adapted["reason"] = (
+            f"{adapted.get('reason', '')} | Fail-learning bevorzugt ghost_click für stabile ID-Targets"
+        ).strip(" |")
+        return adapted
+
+    if description:
+        adapted["next_action"] = "vision_click"
+        adapted["next_params"] = {"description": description}
+        adapted["reason"] = (
+            f"{adapted.get('reason', '')} | Fail-learning weicht auf vision_click aus"
+        ).strip(" |")
+        return adapted
+
+    return adapted
 
 
 # ============================================================================
@@ -400,35 +863,48 @@ def _resolve_opencode_bin() -> str:
     return "opencode"
 
 
-async def run_vision_model(
+async def _run_vision_opencode(
     prompt: str,
     screenshot_path: str,
     *,
     timeout: int = 120,
     step_num: int = 0,
     purpose: str = "vision",
-) -> dict:
+) -> dict[str, object]:
     """
     Führt einen screenshot-basierten OpenSIN-Vision-Call über `opencode run` aus.
     WHY: Preflight-Probe und reguläre Vision-Entscheidungen müssen denselben CLI-Pfad
     nutzen, damit Auth-Fehler zentral erkannt und fail-closed behandelt werden.
     CONSEQUENCES: Gibt strukturierte Resultate mit `ok` und `auth_failure` zurück.
-     """
-     cli_timeout = max(15, min(timeout, 25))
-     opencode_bin = _resolve_opencode_bin()
-     cmd = [
-         "timeout",
-         str(cli_timeout),
-         opencode_bin,
-         "run",
-         prompt,
-         "-f",
-         screenshot_path,
-         "--model",
-         VISION_MODEL,
-         "--format",
-         "json",
-     ]
+    """
+    if not VISION_CIRCUIT_BREAKER.allow_request():
+        audit("error", message=f"Vision circuit open ({purpose})", step=step_num)
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"Vision circuit open ({purpose})",
+            "stdout_text": "",
+            "stderr_text": "",
+            "returncode": None,
+            "circuit_open": True,
+        }
+
+    start_time = time.time()
+    cli_timeout = max(30, timeout - 5)
+    opencode_bin = _resolve_opencode_bin()
+    cmd = [
+        "timeout",
+        str(cli_timeout),
+        opencode_bin,
+        "run",
+        prompt,
+        "-f",
+        screenshot_path,
+        "--model",
+        VISION_MODEL,
+        "--format",
+        "json",
+    ]
     # DEBUG: For step 1, write the exact command to a file for manual reproduction
     if step_num == 1:
         try:
@@ -454,6 +930,7 @@ async def run_vision_model(
                 process.kill()
             except:
                 pass
+            VISION_CIRCUIT_BREAKER.record_failure()
             return {
                 "ok": False,
                 "auth_failure": False,
@@ -473,6 +950,7 @@ async def run_vision_model(
                 and process.returncode in (124, 137)
                 and not auth_error
             ):
+                VISION_CIRCUIT_BREAKER.record_success()
                 return {
                     "ok": True,
                     "auth_failure": False,
@@ -482,6 +960,7 @@ async def run_vision_model(
                     "returncode": process.returncode,
                 }
             if full_text and process.returncode in (124, 137):
+                VISION_CIRCUIT_BREAKER.record_success()
                 return {
                     "ok": True,
                     "auth_failure": False,
@@ -490,6 +969,7 @@ async def run_vision_model(
                     "stderr_text": stderr_text,
                     "returncode": process.returncode,
                 }
+            VISION_CIRCUIT_BREAKER.record_failure()
             error_message = (
                 stderr_text or full_text or f"opencode exit {process.returncode}"
             )
@@ -536,6 +1016,7 @@ async def run_vision_model(
                 "returncode": process.returncode,
             }
 
+        VISION_CIRCUIT_BREAKER.record_success()
         return {
             "ok": True,
             "auth_failure": False,
@@ -545,6 +1026,7 @@ async def run_vision_model(
         }
 
     except asyncio.TimeoutError:
+        VISION_CIRCUIT_BREAKER.record_failure()
         audit("error", message=f"Vision Timeout ({purpose})", step=step_num)
         return {
             "ok": False,
@@ -571,6 +1053,7 @@ async def run_vision_model(
                 "stderr_text": str(e),
                 "returncode": None,
             }
+        VISION_CIRCUIT_BREAKER.record_failure()
         audit("error", message=f"Vision Exception ({purpose}): {e}", step=step_num)
         return {
             "ok": False,
@@ -580,6 +1063,184 @@ async def run_vision_model(
             "stderr_text": str(e),
             "returncode": None,
         }
+    finally:
+        if CURRENT_RUN_SUMMARY is not None:
+            CURRENT_RUN_SUMMARY.record_vision_call(time.time() - start_time)
+
+
+async def _nvidia_nim_chat(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int,
+    model: str,
+    force_json: bool = True,
+) -> dict[str, object]:
+    if not NVIDIA_API_KEY:
+        return {
+            "ok": False,
+            "auth_failure": True,
+            "error": "NVIDIA_API_KEY fehlt",
+            "stdout_text": "",
+            "stderr_text": "",
+            "returncode": None,
+        }
+
+    def _call_nvidia() -> tuple[int, str, str]:
+        with open(screenshot_path, "rb") as screenshot_file:
+            image_b64 = base64.b64encode(screenshot_file.read()).decode("ascii")
+
+        content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+            },
+        ]
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0,
+        }
+        if force_json:
+            body["response_format"] = {"type": "json_object"}
+
+        req = urllib.request.Request(
+            f"{WORKER_CONFIG.nvidia.base_url}/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.getcode(), resp.read().decode("utf-8"), ""
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, e.read().decode("utf-8"), str(e)
+            except Exception:
+                return e.code, "", str(e)
+        except Exception as e:
+            return 599, "", str(e)
+
+    status_code, response_text, error_text = await asyncio.to_thread(_call_nvidia)
+    if status_code == 401:
+        return {
+            "ok": False,
+            "auth_failure": True,
+            "error": error_text or response_text or "HTTP 401",
+            "stdout_text": response_text,
+            "stderr_text": error_text,
+            "returncode": status_code,
+        }
+    if status_code == 429:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": error_text or response_text or "HTTP 429",
+            "stdout_text": response_text,
+            "stderr_text": error_text,
+            "returncode": status_code,
+            "rate_limited": True,
+        }
+    if status_code >= 400:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": error_text or response_text or f"HTTP {status_code}",
+            "stdout_text": response_text,
+            "stderr_text": error_text,
+            "returncode": status_code,
+        }
+
+    try:
+        payload = json.loads(response_text)
+    except Exception as e:
+        return {
+            "ok": False,
+            "auth_failure": False,
+            "error": f"NVIDIA JSON Parse Error: {e}",
+            "stdout_text": response_text,
+            "stderr_text": error_text,
+            "returncode": status_code,
+        }
+
+    choices = payload.get("choices") or []
+    message = choices[0].get("message", {}) if choices else {}
+    text = message.get("content", "") if isinstance(message, dict) else ""
+    return {
+        "ok": True,
+        "auth_failure": False,
+        "text": text,
+        "stdout_text": response_text,
+        "stderr_text": error_text,
+        "returncode": status_code,
+        "model_used": model,
+    }
+
+
+async def _run_vision_nvidia(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int,
+    step_num: int,
+    purpose: str,
+) -> dict[str, object]:
+    models = (NVIDIA_VISION_MODEL, *NVIDIA_FALLBACK_MODELS)
+    last_result: dict[str, object] = {
+        "ok": False,
+        "auth_failure": False,
+        "error": "Kein NVIDIA-Modell probiert",
+    }
+    for model in models:
+        result = await _nvidia_nim_chat(
+            prompt,
+            screenshot_path,
+            timeout=timeout,
+            model=model,
+            force_json=True,
+        )
+        if result.get("ok") or result.get("auth_failure"):
+            return result
+        last_result = result
+        audit("error", message=f"NVIDIA-Modell fehlgeschlagen: {model}", step=step_num)
+    return last_result
+
+
+async def run_vision_model(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int = 120,
+    step_num: int = 0,
+    purpose: str = "vision",
+) -> dict[str, object]:
+    if VISION_BACKEND == "nvidia":
+        return await _run_vision_nvidia(
+            prompt,
+            screenshot_path,
+            timeout=timeout,
+            step_num=step_num,
+            purpose=purpose,
+        )
+    if VISION_BACKEND == "auto" and NVIDIA_API_KEY:
+        return await _run_vision_nvidia(
+            prompt,
+            screenshot_path,
+            timeout=timeout,
+            step_num=step_num,
+            purpose=purpose,
+        )
+    return await _run_vision_opencode(
+        prompt,
+        screenshot_path,
+        timeout=timeout,
+        step_num=step_num,
+        purpose=purpose,
+    )
 
 
 async def ensure_worker_preflight() -> dict:
@@ -1079,12 +1740,13 @@ async def recover_worker_tab_id() -> int | None:
     return None
 
 
-async def execute_bridge(method: str, params: dict = None):
+async def execute_bridge(method: str, params: dict[str, object] | None = None):
     """
     Führt einen Bridge-Tool-Call aus und decodiert das Ergebnis.
     WHY: Zentraler Wrapper der JEDEN Bridge-Call absichert.
     CONSEQUENCES: Fängt alle Exceptions und gibt ein Error-Dict zurück statt zu crashen.
     """
+    started_at = time.time()
     try:
         call_params = params or {}
         raw = await asyncio.to_thread(
@@ -1121,6 +1783,9 @@ async def execute_bridge(method: str, params: dict = None):
     except Exception as e:
         audit("error", message=f"execute_bridge({method}) failed: {e}")
         return {"error": str(e)}
+    finally:
+        if CURRENT_RUN_SUMMARY is not None:
+            CURRENT_RUN_SUMMARY.record_bridge_call(time.time() - started_at)
 
 
 async def check_bridge_alive():
@@ -1323,6 +1988,34 @@ async def dom_prescan():
 # ============================================================================
 
 
+def _vision_cache_get(
+    screenshot_hash: str, action_desc: str, step_num: int
+) -> dict[str, object] | None:
+    if not screenshot_hash:
+        return None
+    cache_key = (screenshot_hash, action_desc.strip().lower())
+    cached = _VISION_CACHE.get(cache_key)
+    if not cached:
+        return None
+    if _should_bypass_cached_decision(cached):
+        audit("vision_cache_bypass", step=step_num, hash=screenshot_hash[:8])
+        return None
+    audit("vision_cache_hit", step=step_num, hash=screenshot_hash[:8])
+    return dict(cached)
+
+
+def _vision_cache_put(
+    screenshot_hash: str, action_desc: str, step_num: int, decision: dict[str, object]
+) -> None:
+    if not screenshot_hash:
+        return
+    if not _should_store_cached_decision(decision):
+        return
+    cache_key = (screenshot_hash, action_desc.strip().lower())
+    _VISION_CACHE[cache_key] = dict(decision)
+    audit("vision_cache_store", step=step_num, hash=screenshot_hash[:8])
+
+
 async def ask_vision(
     screenshot_path: str, action_desc: str, expected: str, step_num: int
 ):
@@ -1331,6 +2024,16 @@ async def ask_vision(
     WHY: KEIN EINZIGER KLICK ohne dass das Vision-Modell den Bildschirm gesehen hat.
     CONSEQUENCES: Bei Parse-Fehler wird RETRY zurückgegeben (nie ein Crash).
     """
+    screenshot_hash = ""
+    try:
+        screenshot_hash = hashlib.md5(Path(screenshot_path).read_bytes()).hexdigest()
+    except Exception:
+        pass
+
+    cached = _vision_cache_get(screenshot_hash, action_desc, step_num)
+    if cached is not None:
+        return cached
+
     # DOM Pre-Scan: Echte Selektoren VOR dem Vision-Call holen!
     dom_context = await dom_prescan()
 
@@ -1338,6 +2041,7 @@ async def ask_vision(
     # WHY: Gemini muss wissen wer der User ist um Profil-Fragen korrekt zu beantworten.
     #      Ohne Profil würde Gemini zufällig wählen → falsche Region, falscher Name etc.
     profile_context = _build_profile_context()
+    fail_learning_context = build_fail_learning_context()
 
     prompt = f"""Du bist der Vision Gate Controller der OpenSIN-Bridge.
 
@@ -1347,6 +2051,8 @@ KONTEXT:
 - Schritt Nummer: {step_num} von maximal {MAX_STEPS}
 
 {profile_context}
+
+{fail_learning_context}
 
 {dom_context}
 
@@ -1493,6 +2199,12 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
                 if full_text.startswith("json"):
                     full_text = full_text[4:].strip()
 
+        if full_text and not full_text.lstrip().startswith("{"):
+            start = full_text.find("{")
+            end = full_text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                full_text = full_text[start : end + 1]
+
         result = json.loads(full_text)
         audit(
             "vision_check",
@@ -1502,6 +2214,7 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
             reason=result.get("reason", "")[:150],
             next_action=result.get("next_action"),
         )
+        _vision_cache_put(screenshot_hash, action_desc, step_num, result)
         return result
 
     except json.JSONDecodeError as e:
@@ -2083,9 +2796,10 @@ class VisionGateController:
         self.consecutive_retries = 0
         self.no_progress_count = 0
         self.last_screenshot_hash = None
-        self.failed_selectors = set()
+        self.failed_selectors = {}
         self.last_page_state = None
         self.successful_actions = 0
+        self.action_history = []
 
     def should_continue(self) -> bool:
         """Prüft ob der Worker weitermachen darf."""
@@ -2138,6 +2852,8 @@ class VisionGateController:
         # Page-State-Tracking
         if page_state:
             if page_state != self.last_page_state:
+                self.failed_selectors.clear()
+                self.clear_action_history()
                 audit("state_change", old=self.last_page_state, new=page_state)
             self.last_page_state = page_state
 
@@ -2148,11 +2864,20 @@ class VisionGateController:
     def add_failed_selector(self, selector: str):
         """Merkt sich einen fehlgeschlagenen Selektor um ihn nicht nochmal zu versuchen."""
         if selector:
-            self.failed_selectors.add(selector)
+            self.failed_selectors[selector] = self.failed_selectors.get(selector, 0) + 1
 
     def is_selector_failed(self, selector: str) -> bool:
         """Prüft ob ein Selektor bereits fehlgeschlagen ist."""
-        return selector in self.failed_selectors
+        return self.failed_selectors.get(selector, 0) >= 3
+
+    def record_action(self, screenshot_hash: str, action: str, params: dict) -> bool:
+        signature = (screenshot_hash or "", action, json.dumps(params, sort_keys=True))
+        self.action_history.append(signature)
+        self.action_history = self.action_history[-3:]
+        return len(self.action_history) == 3 and len(set(self.action_history)) == 1
+
+    def clear_action_history(self):
+        self.action_history.clear()
 
     def mark_dom_progress(self):
         """
@@ -2168,6 +2893,25 @@ class VisionGateController:
                 "state_change",
                 message="DOM-Fortschritt bestätigt: no_progress_count zurückgesetzt",
             )
+
+
+def _resolve_profile_value(field_hint: str) -> str | None:
+    lowered = field_hint.lower()
+    lookup = (
+        ("first_name", ("first", "vorname", "given")),
+        ("last_name", ("last", "surname", "nachname", "family")),
+        ("name", ("name", "fullname", "full-name")),
+        ("city", ("city", "stadt", "ort", "wohnort")),
+        ("region", ("region", "bundesland")),
+        ("country", ("country", "land")),
+        ("gender", ("gender", "geschlecht", "sex")),
+    )
+    for key, hints in lookup:
+        if any(hint in lowered for hint in hints):
+            value = USER_PROFILE.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 # ============================================================================
@@ -2191,6 +2935,18 @@ def inject_credentials(params: dict, email: str, pwd: str) -> dict:
     elif text == "<PASSWORD>" or text.upper() == "PASSWORD":
         params["text"] = pwd or ""
         audit("action", message="Credential injected: PASSWORD (redacted)")
+    elif text == "<NAME>":
+        params["text"] = str(USER_PROFILE.get("name") or "")
+    elif text == "<AUTO>":
+        selector_hint = str(params.get("selector", ""))
+        resolved = _resolve_profile_value(selector_hint)
+        if resolved is not None:
+            params["text"] = resolved
+    else:
+        selector_hint = str(params.get("selector", ""))
+        resolved = _resolve_profile_value(selector_hint)
+        if text in ("<FIRST_NAME>", "<LAST_NAME>", "<CITY>", "<REGION>") and resolved:
+            params["text"] = resolved
 
     return params
 
@@ -2253,12 +3009,154 @@ async def run_click_action(
     return clicked
 
 
+def _write_structured_run_summary(run_summary: RunSummary, gate) -> Path:
+    summary = run_summary.to_dict(include_steps=True)
+    summary["artifact_dir"] = str(ARTIFACT_DIR)
+    summary["screenshots"] = len(list(SCREENSHOT_DIR.glob("*.png")))
+    summary["audit_entries"] = (
+        sum(1 for _ in open(AUDIT_LOG_PATH)) if AUDIT_LOG_PATH.exists() else 0
+    )
+    if gate is not None:
+        summary["controller"] = {
+            "total_steps": gate.total_steps,
+            "successful_actions": gate.successful_actions,
+            "consecutive_retries": gate.consecutive_retries,
+            "no_progress_count": gate.no_progress_count,
+            "last_page_state": gate.last_page_state,
+            "failed_selectors": list(gate.failed_selectors),
+        }
+    summary_path = ARTIFACT_DIR / "run_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    return summary_path
+
+
+async def _run_fail_replay_analysis(
+    recorder,
+    run_summary: RunSummary,
+    gate,
+    exit_reason: str,
+    final_page_state: str,
+) -> Path | None:
+    if recorder is None:
+        return None
+
+    keyframes = recorder.get_keyframes(WORKER_CONFIG.recorder.keyframes_on_fail)
+    output_dir = ARTIFACT_DIR / "fail_replay"
+    keyframe_paths = save_keyframes_to_disk(keyframes, output_dir, prefix="keyframe")
+    keyframe_urls = []
+    for path in keyframe_paths:
+        uploaded_url = upload_to_box(path)
+        if uploaded_url:
+            keyframe_urls.append(uploaded_url)
+
+    step_annotations = []
+    for frame in keyframes:
+        parts = [frame.step_label, frame.vision_verdict, frame.page_state]
+        step_annotations.append(" | ".join(part for part in parts if part) or "frame")
+
+    fail_context = (
+        f"exit_reason={exit_reason}; total_steps={run_summary.total_steps}; "
+        f"page_state={final_page_state}; retries={getattr(gate, 'consecutive_retries', 0)}; "
+        f"no_progress={getattr(gate, 'no_progress_count', 0)}"
+    )
+
+    analysis = await analyze_fail_multiframe(
+        keyframe_bytes=[frame.png_bytes for frame in keyframes],
+        fail_context=fail_context,
+        nvidia_api_key=NVIDIA_API_KEY,
+        step_annotations=step_annotations,
+        model=NVIDIA_VISION_MODEL,
+        nim_base_url=WORKER_CONFIG.nvidia.base_url,
+        timeout=WORKER_CONFIG.nvidia.timeout,
+        max_image_bytes=WORKER_CONFIG.nvidia.max_inline_bytes,
+    )
+
+    report_md = generate_fail_report_markdown(
+        analysis=analysis,
+        run_id=RUN_ID,
+        total_steps=run_summary.total_steps,
+        last_page_state=final_page_state,
+        keyframe_urls=keyframe_urls,
+    )
+    report_path = save_fail_report_to_disk(report_md, analysis, output_dir, RUN_ID)
+    remember_fail_learning(analysis, exit_reason, final_page_state, gate=gate)
+
+    repo = os.environ.get("FAIL_REPORT_REPO", "")
+    issue_number = os.environ.get("FAIL_REPORT_ISSUE_NUMBER", "")
+    comment_posted = False
+    if repo and issue_number.isdigit():
+        comment_posted = post_github_issue_comment(repo, int(issue_number), report_md)
+
+    audit(
+        "fail_replay",
+        report_path=str(report_path),
+        keyframes=len(keyframes),
+        comment_posted=comment_posted,
+        analysis_error=str(analysis.get("error", ""))[:200],
+    )
+    return report_path
+
+
+def _resolve_terminal_exit_reason(exit_reason: str, gate) -> str:
+    if exit_reason != "startup":
+        return exit_reason
+    if gate is None:
+        return "startup"
+    if gate.total_steps >= MAX_STEPS:
+        return "limit_reached:max_steps"
+    if gate.consecutive_retries >= MAX_RETRIES:
+        return "limit_reached:max_retries"
+    if gate.no_progress_count >= MAX_NO_PROGRESS:
+        return "limit_reached:no_progress"
+    return "loop_finished"
+
+
+def _should_generate_fail_replay(exit_reason: str) -> bool:
+    return exit_reason not in {"vision_done", "loop_finished"}
+
+
+async def _finalize_worker_run(
+    run_summary: RunSummary,
+    gate,
+    final_exit_reason: str,
+    final_page_state: str,
+    recorder,
+) -> tuple[Path, Path | None, str]:
+    global CURRENT_RUN_SUMMARY
+
+    resolved_exit_reason = _resolve_terminal_exit_reason(final_exit_reason, gate)
+    if recorder is not None:
+        await recorder.stop()
+
+    run_summary.finalize(exit_reason=resolved_exit_reason, page_state=final_page_state)
+    summary_path = _write_structured_run_summary(run_summary, gate)
+    fail_report_path = None
+    if _should_generate_fail_replay(resolved_exit_reason):
+        fail_report_path = await _run_fail_replay_analysis(
+            recorder,
+            run_summary,
+            gate,
+            resolved_exit_reason,
+            final_page_state,
+        )
+    CURRENT_RUN_SUMMARY = None
+    return summary_path, fail_report_path, resolved_exit_reason
+
+
 # ============================================================================
 # HAUPTSCHLEIFE — Der komplette Vision Gate Loop
 # ============================================================================
 
 
 async def main():
+    global CURRENT_RUN_SUMMARY
+    run_summary = RunSummary(run_id=RUN_ID)
+    CURRENT_RUN_SUMMARY = run_summary
+    gate = None
+    recorder = None
+    final_exit_reason = "startup"
+    final_page_state = "unknown"
+
     audit(
         "start",
         message="A2A-SIN-Worker-HeyPiggy Vision Gate v2.0",
@@ -2268,8 +3166,13 @@ async def main():
 
     # 1. BRIDGE-VERBINDUNG PRÜFEN
     try:
-        await wait_for_extension(timeout=600)
+        await wait_for_extension(timeout=BRIDGE_CONNECT_TIMEOUT)
     except Exception as e:
+        final_exit_reason = f"bridge_connect_failed: {e}"
+        run_summary.bridge_errors += 1
+        await _finalize_worker_run(
+            run_summary, gate, final_exit_reason, final_page_state, recorder
+        )
         audit("stop", reason=f"Bridge-Verbindung fehlgeschlagen: {e}")
         return
 
@@ -2288,6 +3191,13 @@ async def main():
     else:
         preflight = await ensure_worker_preflight()
         if not preflight.get("ok"):
+            final_exit_reason = (
+                f"preflight_failed: {preflight.get('reason', 'unknown')}"
+            )
+            run_summary.vision_errors += 1
+            await _finalize_worker_run(
+                run_summary, gate, final_exit_reason, final_page_state, recorder
+            )
             return
 
     # Credentials erst NACH erfolgreichem fail-closed Preflight auslesen.
@@ -2298,6 +3208,11 @@ async def main():
 
     # 3. VISION GATE CONTROLLER INITIALISIEREN
     gate = VisionGateController()
+    recorder = ScreenRingRecorder(
+        fps=WORKER_CONFIG.recorder.fps,
+        buffer_seconds=WORKER_CONFIG.recorder.buffer_seconds,
+    )
+    await recorder.start()
 
     # 4. INITIALE NAVIGATION
     action_desc = "Navigiere zu HeyPiggy Dashboard"
@@ -2320,6 +3235,8 @@ async def main():
                 message=f"Worker-Tab erstellt und gebunden: tabId={CURRENT_TAB_ID}, windowId={CURRENT_WINDOW_ID}",
             )
         else:
+            final_exit_reason = "tabs_create_missing_tab_id"
+            run_summary.bridge_errors += 1
             # tabs_create hat keine tabId zurückgegeben — harter Abbruch.
             # KEIN Fallback auf fremde Tabs, da wir sonst einen User-Tab steuern würden.
             audit(
@@ -2327,14 +3244,27 @@ async def main():
                 reason=f"tabs_create hat keine tabId zurückgegeben: {tab_res}. "
                 "Kein Fallback auf aktiven Tab erlaubt.",
             )
+            await _finalize_worker_run(
+                run_summary, gate, final_exit_reason, final_page_state, recorder
+            )
             return
     except Exception as e:
+        final_exit_reason = f"initial_navigation_failed: {e}"
+        run_summary.bridge_errors += 1
         audit("stop", reason=f"Initiale Navigation fehlgeschlagen: {e}")
+        await _finalize_worker_run(
+            run_summary, gate, final_exit_reason, final_page_state, recorder
+        )
         return
 
     # Verifikation: CURRENT_TAB_ID muss jetzt gesetzt sein
     if CURRENT_TAB_ID is None:
+        final_exit_reason = "missing_current_tab_id_after_init"
+        run_summary.bridge_errors += 1
         audit("stop", reason="CURRENT_TAB_ID ist nach Init immer noch None — Abbruch")
+        await _finalize_worker_run(
+            run_summary, gate, final_exit_reason, final_page_state, recorder
+        )
         return
 
     # Warten auf Seitenlade
@@ -2345,39 +3275,68 @@ async def main():
 
     # 5. VISION GATE LOOP — Das Herzstück
     while gate.should_continue():
+        current_step = gate.total_steps + 1
+
         # ---- Bridge-Health-Check vor JEDER Iteration ----
         if not await check_bridge_alive():
+            final_exit_reason = "bridge_unreachable_during_loop"
+            run_summary.bridge_errors += 1
             audit("stop", reason="Bridge nicht erreichbar, Abbruch")
             break
 
         # ---- SCREENSHOT ----
-        img_path, img_hash = await take_screenshot(
-            gate.total_steps + 1, label=action_desc[:20]
-        )
+        img_path, img_hash = await take_screenshot(current_step, label=action_desc[:20])
         if not img_path:
-            gate.record_step("RETRY", None)
+            gate.record_step("RETRY", "", "unknown")
+            run_summary.record_step(
+                step_number=current_step,
+                verdict="RETRY",
+                page_state="unknown",
+                action="take_screenshot",
+                success=False,
+                error="screenshot_failed",
+            )
             await human_delay(2.0, 4.0)
             continue
 
         # THROTTLE: Vor Vision-Calls länger warten um Rate-Limit zu vermeiden
         # WHY: Antigravity hat Rate-Limits; zu schnelle Calls führen zu leeren Antworten.
-        await human_delay(5.0, 10.0)
+        delay_min, delay_max = get_fail_learning_delay_bounds(5.0, 10.0)
+        await human_delay(delay_min, delay_max)
 
         # ---- VISION CHECK ----
-        decision = await ask_vision(
-            img_path, action_desc, expected, gate.total_steps + 1
-        )
+        decision = await ask_vision(img_path, action_desc, expected, current_step)
 
         verdict = decision.get("verdict", "RETRY")
         reason = decision.get("reason", "Kein Grund")
         page_state = decision.get("page_state", "unknown")
-page_state_machine.transition(page_state)
+        final_page_state = str(page_state)
+        page_state_machine.transition(final_page_state)
         next_action = decision.get("next_action", "none")
         next_params = decision.get("next_params", {})
         progress = decision.get("progress", False)
 
+        decision = apply_fail_learning_to_decision(decision, gate, img_hash or "")
+        verdict = decision.get("verdict", verdict)
+        next_action = decision.get("next_action", next_action)
+        next_params = decision.get("next_params", next_params)
+        progress = decision.get("progress", progress)
+        reason = decision.get("reason", reason)
+
         # Schritt aufzeichnen
-        gate.record_step(verdict, img_hash, page_state)
+        gate.record_step(str(verdict), img_hash or "", final_page_state)
+        if recorder is not None:
+            recorder.annotate_last_frame(
+                f"step_{current_step}_{next_action}", str(verdict), final_page_state
+            )
+        run_summary.record_step(
+            step_number=current_step,
+            verdict=str(verdict),
+            page_state=final_page_state,
+            action=str(next_action),
+            success=str(verdict) != "STOP",
+            error="" if str(verdict) != "STOP" else str(reason),
+        )
 
         print(f"\n{'=' * 60}")
         print(
@@ -2395,6 +3354,7 @@ page_state_machine.transition(page_state)
         # ---- CAPTCHA ERKENNUNG UND BEHANDLUNG (NEU in v3.1) ----
         captcha_detected = await detect_captcha_page()
         if captcha_detected:
+            run_summary.captcha_encounters += 1
             audit("captcha", message="Captcha erkannt! Versuche Auto-Bypass...")
             captcha_ok = await handle_captcha()
             if captcha_ok:
@@ -2423,6 +3383,8 @@ page_state_machine.transition(page_state)
 
         # ---- STOP ----
         if verdict == "STOP":
+            final_exit_reason = f"vision_stop: {reason}"
+            run_summary.vision_errors += 1
             audit("stop", reason=reason, page_state=page_state)
             await save_session("stop_state")
             break
@@ -2437,6 +3399,7 @@ page_state_machine.transition(page_state)
 
         # ---- DONE ----
         if next_action == "none":
+            final_exit_reason = "vision_done"
             audit(
                 "success",
                 message="Vision meldet: Aufgabe erledigt!",
@@ -2453,6 +3416,9 @@ page_state_machine.transition(page_state)
         # oder die Rückkehr zum Dashboard selbst erkennt und navigiert.
         # WARNUNG: Hier kein "break"! Abbrechen würde weitere ausstehende Surveys verpassen.
         if page_state == "survey_done":
+            run_summary.record_survey_completed()
+            if recorder is not None:
+                recorder.clear()
             audit(
                 "success",
                 message="Umfrage vollständig abgeschlossen — Bestätigungsseite erkannt! Warte auf nächste Umfrage.",
@@ -2525,7 +3491,9 @@ page_state_machine.transition(page_state)
                     await asyncio.sleep(0.5)
                     # Type using keyboard (focus already on element)
                     text = params.get("text", "")
-                    await execute_bridge("keyboard", {"keys": list(text), **_tab_params()})
+                    await execute_bridge(
+                        "keyboard", {"keys": list(text), **_tab_params()}
+                    )
                 else:
                     await execute_bridge("type_text", params)
 
@@ -2564,7 +3532,7 @@ page_state_machine.transition(page_state)
                     answer=answer_desc[:80],
                 )
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(get_fail_learning_dom_wait_seconds())
         dom_check = await dom_verify_change(before_url, before_title)
         if dom_check.get("changed"):
             # DOM hat sich verändert → echter Fortschritt → no_progress_count zurücksetzen
@@ -2589,30 +3557,21 @@ page_state_machine.transition(page_state)
     # Final Session sichern
     await save_session("final")
 
-    # Zusammenfassung
-    summary = {
-        "run_id": RUN_ID,
-        "total_steps": gate.total_steps,
-        "successful_actions": gate.successful_actions,
-        "consecutive_retries": gate.consecutive_retries,
-        "no_progress_count": gate.no_progress_count,
-        "last_page_state": gate.last_page_state,
-        "failed_selectors": list(gate.failed_selectors),
-        "artifact_dir": str(ARTIFACT_DIR),
-        "screenshots": len(list(SCREENSHOT_DIR.glob("*.png"))),
-        "audit_entries": sum(1 for _ in open(AUDIT_LOG_PATH)),
-    }
-
-    summary_path = ARTIFACT_DIR / "run_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    summary_path, fail_report_path, final_exit_reason = await _finalize_worker_run(
+        run_summary, gate, final_exit_reason, final_page_state, recorder
+    )
+    run_summary.print_summary()
 
     print(f"\n{'=' * 60}")
     print(f"🏁 LAUF BEENDET — Zusammenfassung:")
     print(f"   Schritte: {gate.total_steps}/{MAX_STEPS}")
     print(f"   Erfolgreich: {gate.successful_actions}")
-    print(f"   Screenshots: {summary['screenshots']}")
+    print(f"   Screenshots: {len(list(SCREENSHOT_DIR.glob('*.png')))}")
     print(f"   Artefakte: {ARTIFACT_DIR}")
     print(f"   Audit-Log: {AUDIT_LOG_PATH}")
+    print(f"   Structured Summary: {summary_path}")
+    if fail_report_path is not None:
+        print(f"   Fail Replay Report: {fail_report_path}")
     print(f"{'=' * 60}\n")
 
 
