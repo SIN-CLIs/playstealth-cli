@@ -2,31 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-A2A-SIN-Worker-HeyPiggy — Vision Gate Edition v3.2 (PERFORMANCE + RELIABILITY)
+A2A-SIN-Worker-HeyPiggy — Vision Gate Edition v3.1 (ANTI-RAUSFLUG + CAPTCHA BYPASS)
 ================================================================================
 ARCHITEKTUR:
   Bridge Extension (Chrome) ←WebSocket→ HF MCP Server ←HTTP→ Dieser Worker
   Jede einzelne Aktion wird von Gemini 3 Flash visuell verifiziert.
-
-KRITISCHE FIXES v3.2 (warum der Agent vorher an fast allem versagt hat):
-  - Vision-Timeout: cli_timeout war auf 25s gecappt obwohl timeout=180s übergeben
-    wurde → JEDER Vision-Call starb. Jetzt nutzt cli_timeout den vollen Timeout.
-  - Eskalation: Früher wurde nach JEDER der 5 Klick-Methoden ein neuer Vision-Call
-    gefeuert → Rate-Limits + 5-10x Latenz. Jetzt DOM-Verifikation (URL/Title/Diff).
-  - Throttle: 5-10s Fix-Delay vor jedem Vision-Call = 10-20 Min Leerlauf pro Run.
-    Jetzt adaptiv: 1-2.5s Standard, exponentieller Backoff nur bei RETRY-Kaskaden.
-  - Survey-Abschluss-Garantie: Setzte next_action="click_ref" mit leeren Params →
-    tat gar nichts. Jetzt echter DOM-Button-Fallback mit "Weiter/Nächste/Submit".
-  - failed_selectors: Als set() gespeichert und nie resetted → einmal gescheitert
-    = für immer gesperrt. Jetzt Counter mit Reset bei Page-State-Wechsel.
-  - Captcha-Zähler: _captcha_attempt_count global und nie zurückgesetzt. Jetzt
-    Reset bei jedem page_state-Wechsel.
-  - Profile-Path: Hardcoded /Users/jeremy/… → funktionierte nur auf Jeremys Mac.
-    Jetzt ENV + XDG + ~/.config Fallback + Env-Variablen als letzter Ausweg.
-  - DOM Pre-Scan: Max 25 Elemente ohne Sichtbarkeits-Filter und ohne Priorisierung
-    → Weiter-Button oft außerhalb der ersten 25. Jetzt 40 Elemente, sichtbar,
-    priorisiert nach Survey-Relevanz, mit Form/Radio/Label Support.
-  - JSON-Parser: Broke bei Prosa um JSON. Jetzt Regex-Extraktion {..} als Fallback.
 
 KERNPRINZIP — EXAKTE TAB-BINDUNG (PRIORITY -7.85):
   Der Worker öffnet genau EINEN Tab (tabs_create) und speichert dessen
@@ -73,6 +53,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Import typed state machine for page state tracking
+from state_machine import page_state_machine
+
 # ============================================================================
 # USER PROFIL — Jeremy Schulze
 # WHY: Der Worker muss Profil-Fragen (Region, Wohnort, Geschlecht, Name etc.)
@@ -83,26 +66,7 @@ from pathlib import Path
 #               Umfragen brechen ab, Account könnte gesperrt werden.
 # ============================================================================
 
-def _resolve_profile_path() -> Path:
-    """
-    Ermittelt den Profil-Pfad portabel.
-    WHY: Früher hardcoded auf /Users/jeremy/... — existiert auf keiner anderen
-         Maschine und bricht Container/CI/Sandbox-Deployments.
-    CONSEQUENCES: Erst HEYPIGGY_PROFILE_PATH (explizit), dann XDG_CONFIG_HOME,
-                  dann ~/.config/opencode/profiles/, dann ein leerer Fallback.
-    """
-    explicit = os.environ.get("HEYPIGGY_PROFILE_PATH")
-    if explicit:
-        return Path(explicit).expanduser()
-
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return Path(xdg) / "opencode" / "profiles" / "user.json"
-
-    return Path.home() / ".config" / "opencode" / "profiles" / "user.json"
-
-
-PROFILE_PATH = _resolve_profile_path()
+PROFILE_PATH = Path("/Users/jeremy/.config/opencode/profiles/jeremy_schulze.json")
 
 
 def _load_user_profile() -> dict:
@@ -118,23 +82,6 @@ def _load_user_profile() -> dict:
                 return json.load(f)
         except Exception as e:
             print(f"[PROFIL] Warnung: Profil konnte nicht geladen werden: {e}")
-    else:
-        # Fallback: Profil aus Env-Variablen bauen (Container-freundlich).
-        env_profile = {}
-        for env_key, profile_key in (
-            ("HEYPIGGY_USER_NAME", "name"),
-            ("HEYPIGGY_USER_FIRST_NAME", "first_name"),
-            ("HEYPIGGY_USER_LAST_NAME", "last_name"),
-            ("HEYPIGGY_USER_GENDER", "gender"),
-            ("HEYPIGGY_USER_CITY", "city"),
-            ("HEYPIGGY_USER_REGION", "region"),
-            ("HEYPIGGY_USER_COUNTRY", "country"),
-        ):
-            val = os.environ.get(env_key)
-            if val:
-                env_profile[profile_key] = val
-        if env_profile:
-            return env_profile
     return {}
 
 
@@ -205,51 +152,7 @@ MAX_RETRIES = 5
 #   Außerdem wird no_progress_count bei page_state='survey_active' NICHT hochgezählt.
 MAX_NO_PROGRESS = 15
 MAX_CLICK_ESCALATIONS = 5  # 5 Klick-Methoden bevor aufgegeben wird
-
-# ============================================================================
-# VISION BACKEND (v3.2 PRO — NVIDIA NIM direct)
-# ============================================================================
-# STRATEGIE: Statt über OpenCode CLI (`opencode run`) zu gehen, sprechen wir
-# NVIDIA NIM direkt via HTTPS an. Das hat massive Vorteile:
-#   - Kein Subprocess-Spawn (spart 2-5s pro Call)
-#   - Kein OpenCode-Token-Rotation-Chaos, keine Antigravity-OAuth-Probleme
-#   - Direktes asyncio-Timeout-Management
-#   - OpenAI-kompatibles JSON-Schema-Forcing via `response_format`
-#   - Free tier via NVIDIA_API_KEY (kein Antigravity-Account nötig)
-#
-# MODELL: meta/llama-3.2-90b-vision-instruct
-#   - 90B Params, 128k Context, Bild+Text input
-#   - Benchmarks: ChartQA 85.5, DocVQA 90.1, MMMU 60.3 — stärker als Gemini Flash
-#   - Free tier auf NVIDIA NIM (integrate.api.nvidia.com)
-#
-# FALLBACK: Wenn NVIDIA_API_KEY fehlt, nutzen wir weiterhin OpenCode CLI.
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "").strip()
-NVIDIA_NIM_BASE_URL = os.environ.get(
-    "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
-).rstrip("/")
-NVIDIA_VISION_MODEL = os.environ.get(
-    "NVIDIA_VISION_MODEL", "meta/llama-3.2-90b-vision-instruct"
-)
-# Fallback-Kette: Primary → kleineres 11B Modell (schneller, free)
-NVIDIA_VISION_FALLBACKS = [
-    m.strip()
-    for m in os.environ.get(
-        "NVIDIA_VISION_FALLBACKS",
-        "meta/llama-3.2-11b-vision-instruct,nvidia/llama-3.1-nemotron-nano-vl-8b-v1",
-    ).split(",")
-    if m.strip()
-]
-# Max Bytes pro Base64-Image bei NVIDIA NIM inline (Policy-Limit ~180KB).
-# WHY: Darüber verlangt NVIDIA den Assets-API-Upload (mehrstufiger Flow).
-#      Wir prüfen & komprimieren proaktiv um keinen 400 zu kassieren.
-NVIDIA_NIM_MAX_IMAGE_BYTES = int(os.environ.get("NVIDIA_NIM_MAX_IMAGE_BYTES", "180000"))
-
-# Backward-Compat: Der OpenCode-CLI-Pfad bleibt als expliziter Fallback.
-VISION_MODEL = os.environ.get("VISION_MODEL", "google/antigravity-gemini-3-flash")
-# Welcher Backend zu verwenden: "nvidia" (default wenn Key da), "opencode", "auto".
-VISION_BACKEND = os.environ.get(
-    "VISION_BACKEND", "auto" if NVIDIA_API_KEY else "opencode"
-).lower()
+VISION_MODEL = "google/antigravity-gemini-3-flash"
 CLICK_ACTIONS = (
     "click_element",
     "click_ref",
@@ -486,387 +389,15 @@ def detect_vision_auth_failure(raw_text: str) -> str | None:
     return None
 
 
-def _downscale_png_if_needed(path: str, max_bytes: int) -> bytes:
-    """
-    Lädt eine PNG-Datei und verkleinert sie ggf. damit sie unter `max_bytes` passt.
-    WHY: NVIDIA NIM akzeptiert inline-base64-Bilder nur bis ~180KB. Browser-
-         Screenshots können 400KB+ sein → sofortiger 400-Fehler ohne Resize.
-    CONSEQUENCES: Nutzt Pillow wenn verfügbar (beste Qualität). Ohne Pillow wird
-                  das Bild unverändert zurückgegeben; NVIDIA wird bei >180KB ein
-                  Fehler werfen den wir abfangen und als "RETRY" behandeln.
-    """
-    with open(path, "rb") as f:
-        raw = f.read()
-    if len(raw) <= max_bytes:
-        return raw
-    try:
-        from PIL import Image  # type: ignore
-        from io import BytesIO
+def _resolve_opencode_bin() -> str:
+    """Resolves the opencode binary path, preferring project-local version for plugin support."""
+    import os
 
-        img = Image.open(BytesIO(raw))
-        # Iterativ runterskalieren bis unter Limit (max 4 Stufen)
-        scale = 0.75
-        for _ in range(5):
-            w, h = img.size
-            new = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-            buf = BytesIO()
-            new.save(buf, format="PNG", optimize=True)
-            out = buf.getvalue()
-            if len(out) <= max_bytes:
-                return out
-            img = new
-            scale = 0.85
-        # JPEG als letzter Ausweg (kleinere Files, NVIDIA akzeptiert)
-        buf = BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=70, optimize=True)
-        return buf.getvalue()
-    except ImportError:
-        # Pillow nicht installiert: Rohbytes zurückgeben, NVIDIA wird evtl 400'en
-        # Wir loggen das einmalig damit Ops es sieht.
-        if not getattr(_downscale_png_if_needed, "_warned", False):
-            print(
-                "[VISION] HINWEIS: Pillow nicht installiert — große Screenshots "
-                "können NVIDIA NIM überschreiten. Installiere: pip install Pillow"
-            )
-            _downscale_png_if_needed._warned = True  # type: ignore[attr-defined]
-        return raw
-    except Exception as e:
-        print(f"[VISION] Downscale fehlgeschlagen: {e} — sende Original")
-        return raw
-
-
-async def _nvidia_nim_chat(
-    prompt: str,
-    screenshot_path: str,
-    *,
-    timeout: int,
-    model: str,
-    force_json: bool = True,
-) -> dict:
-    """
-    Direkter HTTP-Call gegen NVIDIA NIM `/chat/completions` (OpenAI-kompatibel).
-    WHY: Umgeht komplett die OpenCode-CLI (Subprocess, Token-Rotation, Timeouts).
-         Direkt, async, deterministisch — und meta/llama-3.2-90b-vision-instruct
-         ist auf Vision-Benchmarks (ChartQA, DocVQA, MMMU) Spitze unter free
-         Modellen.
-    CONSEQUENCES: Gibt dasselbe Response-Format wie run_vision_model zurück
-                  (ok/auth_failure/text/…) damit der Rest des Codes unverändert
-                  bleibt.
-    """
-    if not NVIDIA_API_KEY:
-        return {
-            "ok": False,
-            "auth_failure": True,
-            "error": "NVIDIA_API_KEY nicht gesetzt",
-            "stdout_text": "",
-            "stderr_text": "",
-            "returncode": None,
-        }
-
-    # Bild laden + ggf. komprimieren
-    try:
-        img_bytes = _downscale_png_if_needed(screenshot_path, NVIDIA_NIM_MAX_IMAGE_BYTES)
-    except Exception as e:
-        return {
-            "ok": False,
-            "auth_failure": False,
-            "error": f"Bild konnte nicht geladen werden: {e}",
-            "stdout_text": "",
-            "stderr_text": str(e),
-            "returncode": None,
-        }
-
-    b64 = base64.b64encode(img_bytes).decode("ascii")
-    # Mime-Type erraten (PNG default, JPEG wenn klein-optimiert)
-    mime = "image/png"
-    if img_bytes[:2] == b"\xff\xd8":
-        mime = "image/jpeg"
-    data_url = f"data:{mime};base64,{b64}"
-
-    # WHY JSON-Mode: Llama neigt zu Prosa; wir zwingen via response_format strikt
-    # zu validem JSON. NVIDIA NIM unterstützt OpenAI's response_format={type:json_object}.
-    system_prompt = (
-        "Du bist ein präziser Browser-Automation-Agent. "
-        "Antworte AUSSCHLIESSLICH mit einem einzigen gültigen JSON-Objekt. "
-        "KEINE Prosa, KEINE Markdown-Blöcke, KEINE Erklärungen vor oder nach dem JSON. "
-        "Schlüssel: verdict, page_state, next_action, next_params, reason, progress."
-    )
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            },
-        ],
-        "temperature": 0.1,
-        "top_p": 0.95,
-        "max_tokens": 2048,
-        "stream": False,
-    }
-    if force_json:
-        payload["response_format"] = {"type": "json_object"}
-
-    body = json.dumps(payload).encode("utf-8")
-    url = f"{NVIDIA_NIM_BASE_URL}/chat/completions"
-
-    def _do_request() -> tuple[int, str, str]:
-        req = urllib.request.Request(
-            url,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, resp.read().decode("utf-8", errors="replace"), ""
-        except urllib.error.HTTPError as e:
-            try:
-                err_body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                err_body = ""
-            return e.code, "", err_body
-        except urllib.error.URLError as e:
-            return 0, "", f"URLError: {e.reason}"
-        except Exception as e:
-            return 0, "", f"Exception: {e}"
-
-    # Request in Thread um asyncio nicht zu blockieren
-    try:
-        status, body_text, err_text = await asyncio.wait_for(
-            asyncio.to_thread(_do_request), timeout=timeout + 3
-        )
-    except asyncio.TimeoutError:
-        return {
-            "ok": False,
-            "auth_failure": False,
-            "error": f"NVIDIA NIM Timeout nach {timeout}s",
-            "stdout_text": "",
-            "stderr_text": "",
-            "returncode": None,
-        }
-
-    if status == 401 or status == 403:
-        return {
-            "ok": False,
-            "auth_failure": True,
-            "error": f"NVIDIA NIM auth failure ({status}): {err_text[:200]}",
-            "stdout_text": "",
-            "stderr_text": err_text,
-            "returncode": status,
-        }
-    if status == 429:
-        # Rate limit → nicht als auth failure, sondern als retry-bar
-        return {
-            "ok": False,
-            "auth_failure": False,
-            "error": f"NVIDIA NIM rate limit (429): {err_text[:200]}",
-            "rate_limited": True,
-            "stdout_text": "",
-            "stderr_text": err_text,
-            "returncode": status,
-        }
-    if status != 200:
-        return {
-            "ok": False,
-            "auth_failure": False,
-            "error": f"NVIDIA NIM HTTP {status}: {err_text[:300] or body_text[:300]}",
-            "stdout_text": body_text,
-            "stderr_text": err_text,
-            "returncode": status,
-        }
-
-    try:
-        data = json.loads(body_text)
-        choices = data.get("choices", [])
-        if not choices:
-            return {
-                "ok": False,
-                "auth_failure": False,
-                "error": "NVIDIA NIM: keine choices im Response",
-                "stdout_text": body_text,
-                "stderr_text": "",
-                "returncode": status,
-            }
-        content = choices[0].get("message", {}).get("content", "")
-        if isinstance(content, list):
-            # Manche NIM-Modelle streamen content als Liste von {type,text}
-            content = "".join(
-                c.get("text", "") for c in content if isinstance(c, dict)
-            )
-        return {
-            "ok": True,
-            "auth_failure": False,
-            "text": content or "",
-            "stdout_text": content or "",
-            "stderr_text": "",
-            "returncode": status,
-            "model_used": data.get("model", model),
-            "usage": data.get("usage", {}),
-        }
-    except Exception as e:
-        return {
-            "ok": False,
-            "auth_failure": False,
-            "error": f"NVIDIA NIM parse error: {e}",
-            "stdout_text": body_text,
-            "stderr_text": str(e),
-            "returncode": status,
-        }
-
-
-# Hedging: nach HEDGE_DELAY Sekunden Wartezeit startet parallel das Fallback-Modell.
-# Wer zuerst gültig antwortet, gewinnt — der andere wird gecancelled.
-# WHY: Typ. p50 90B = 3-6s, p95 = 15-30s. Bei schlechten Tagen p99 > 60s.
-#      Hedged Request bringt p95 auf unter 10s ohne die Kosten zu verdoppeln.
-NVIDIA_HEDGE_DELAY = float(os.environ.get("NVIDIA_HEDGE_DELAY", "6.0"))
-
-
-async def _nvidia_call_with_hedge(
-    prompt: str,
-    screenshot_path: str,
-    *,
-    timeout: int,
-    primary_model: str,
-    hedge_model: str | None,
-    step_num: int,
-) -> dict:
-    """
-    Startet den Primary-Call; nach NVIDIA_HEDGE_DELAY Sekunden startet parallel
-    ein Call gegen das Hedge-Modell. First-good-wins, loser wird gecancelled.
-    WHY: Reduziert p95-Latenz drastisch ohne die Request-Rate zu verdoppeln,
-         solange das Primary-Modell schnell genug antwortet.
-    CONSEQUENCES: Wenn Primary innerhalb HEDGE_DELAY antwortet, kein extra Call.
-                  Wenn Primary langsam, Hedge füllt die Lücke → beste p95-Perf.
-    """
-    if not hedge_model:
-        return await _nvidia_nim_chat(
-            prompt, screenshot_path, timeout=timeout, model=primary_model
-        )
-
-    primary = asyncio.create_task(
-        _nvidia_nim_chat(prompt, screenshot_path, timeout=timeout, model=primary_model),
-        name=f"vision-primary-{step_num}",
-    )
-    try:
-        done, pending = await asyncio.wait(
-            {primary}, timeout=NVIDIA_HEDGE_DELAY, return_when=asyncio.FIRST_COMPLETED
-        )
-        if done:
-            # Primary war schnell genug — fertig
-            result = primary.result()
-            return result
-    except asyncio.CancelledError:
-        primary.cancel()
-        raise
-
-    # Primary noch nicht fertig → Hedge starten
-    audit(
-        "vision_check",
-        step=step_num,
-        message=f"Vision-Hedge: Primary braucht > {NVIDIA_HEDGE_DELAY}s, starte {hedge_model} parallel",
-    )
-    hedge = asyncio.create_task(
-        _nvidia_nim_chat(prompt, screenshot_path, timeout=timeout, model=hedge_model),
-        name=f"vision-hedge-{step_num}",
-    )
-    # Auf ersten gültigen Erfolg warten
-    while True:
-        done, pending = await asyncio.wait(
-            {primary, hedge}, return_when=asyncio.FIRST_COMPLETED
-        )
-        winner = None
-        loser = None
-        for t in done:
-            res = t.result()
-            if res.get("ok"):
-                winner = t
-                break
-        if winner:
-            loser = hedge if winner is primary else primary
-            if not loser.done():
-                loser.cancel()
-            return winner.result()
-        # Kein Erfolg unter den fertigen → wenn einer noch läuft, auf den warten
-        still_running = [t for t in (primary, hedge) if not t.done()]
-        if not still_running:
-            # Beide gescheitert — primary-Result als aussagekräftiger nehmen
-            return primary.result()
-        # Sonst Schleife: auf den verbleibenden warten
-        done, _ = await asyncio.wait(still_running, return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            res = t.result()
-            if res.get("ok"):
-                # Gegenteil cancellen falls noch am Laufen
-                other = primary if t is hedge else hedge
-                if not other.done():
-                    other.cancel()
-                return res
-        # Alle fertig, keiner ok → primary-result
-        return primary.result()
-
-
-async def _run_vision_nvidia(
-    prompt: str,
-    screenshot_path: str,
-    *,
-    timeout: int,
-    step_num: int,
-    purpose: str,
-) -> dict:
-    """
-    Top-Level Wrapper: primäres Modell + Fallback-Kette bei Fehlern/Rate-Limits.
-    WHY: Wenn das 90B-Modell überlastet ist, ist das 11B immer noch stark genug
-         für Survey-Navigation und deutlich schneller.
-    v3.2 PRO: Der erste Versuch nutzt Hedged Request (Primary + 11B parallel nach
-              NVIDIA_HEDGE_DELAY). Fallback-Kette nur wenn Hedge komplett scheitert.
-    """
-    models_to_try = [NVIDIA_VISION_MODEL] + NVIDIA_VISION_FALLBACKS
-    last_result: dict = {}
-    for i, model in enumerate(models_to_try):
-        if i > 0:
-            audit(
-                "vision_check",
-                step=step_num,
-                message=f"NVIDIA Fallback zu {model} (vorher: {last_result.get('error', '')[:80]})",
-            )
-        # Hedging nur für das Primary-Modell (sonst würde jeder Fallback auch hedgen)
-        if i == 0 and NVIDIA_VISION_FALLBACKS:
-            result = await _nvidia_call_with_hedge(
-                prompt,
-                screenshot_path,
-                timeout=timeout,
-                primary_model=model,
-                hedge_model=NVIDIA_VISION_FALLBACKS[0],
-                step_num=step_num,
-            )
-        else:
-            result = await _nvidia_nim_chat(
-                prompt,
-                screenshot_path,
-                timeout=timeout,
-                model=model,
-                force_json=True,
-            )
-        last_result = result
-        if result.get("ok"):
-            return result
-        # Bei Auth-Failure früh raus — bei allen anderen Fehlern nächstes Modell
-        if result.get("auth_failure"):
-            return result
-        # Bei Rate-Limit kleinen Jitter bevor wir das nächste Modell probieren
-        if result.get("rate_limited"):
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-    return last_result
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    local_bin = os.path.join(project_root, "node_modules", ".bin", "opencode")
+    if os.path.exists(local_bin) and os.access(local_bin, os.X_OK):
+        return local_bin
+    return "opencode"
 
 
 async def run_vision_model(
@@ -878,63 +409,26 @@ async def run_vision_model(
     purpose: str = "vision",
 ) -> dict:
     """
-    Haupteinstieg für Vision-Calls. Wählt automatisch zwischen:
-      - NVIDIA NIM direkt (bevorzugt wenn NVIDIA_API_KEY + VISION_BACKEND='nvidia'|'auto')
-      - OpenCode CLI (Fallback / legacy Pfad)
-    WHY: Preflight-Probe und reguläre Vision-Entscheidungen müssen denselben Pfad
+    Führt einen screenshot-basierten OpenSIN-Vision-Call über `opencode run` aus.
+    WHY: Preflight-Probe und reguläre Vision-Entscheidungen müssen denselben CLI-Pfad
     nutzen, damit Auth-Fehler zentral erkannt und fail-closed behandelt werden.
     CONSEQUENCES: Gibt strukturierte Resultate mit `ok` und `auth_failure` zurück.
-    """
-    # --- NVIDIA NIM Pfad ---
-    if VISION_BACKEND in ("nvidia", "auto") and NVIDIA_API_KEY:
-        return await _run_vision_nvidia(
-            prompt,
-            screenshot_path,
-            timeout=timeout,
-            step_num=step_num,
-            purpose=purpose,
-        )
-    # --- OpenCode CLI Pfad (legacy) ---
-    return await _run_vision_opencode(
-        prompt,
-        screenshot_path,
-        timeout=timeout,
-        step_num=step_num,
-        purpose=purpose,
-    )
-
-
-async def _run_vision_opencode(
-    prompt: str,
-    screenshot_path: str,
-    *,
-    timeout: int = 120,
-    step_num: int = 0,
-    purpose: str = "vision",
-) -> dict:
-    """
-    Legacy-Pfad: screenshot-basierter OpenSIN-Vision-Call über `opencode run`.
-    WHY: Bleibt erhalten als Fallback wenn NVIDIA_API_KEY nicht gesetzt ist.
-    """
-    # FIX: Früher wurde cli_timeout auf 25s gecappt (max(15, min(timeout, 25))).
-    # Das war der Hauptgrund warum JEDER Vision-Call starb — Gemini 3 Flash braucht
-    # bei komplexen Screenshots oft 30-60s. Wir geben dem CLI jetzt das volle Timeout
-    # minus 5s Buffer, damit unser asyncio.wait_for (timeout) greifen kann bevor das
-    # `timeout`-Kommando hart killt.
-    cli_timeout = max(30, timeout - 5)
-    cmd = [
-        "timeout",
-        str(cli_timeout),
-        "opencode",
-        "run",
-        prompt,
-        "-f",
-        screenshot_path,
-        "--model",
-        VISION_MODEL,
-        "--format",
-        "json",
-    ]
+     """
+     cli_timeout = max(15, min(timeout, 25))
+     opencode_bin = _resolve_opencode_bin()
+     cmd = [
+         "timeout",
+         str(cli_timeout),
+         opencode_bin,
+         "run",
+         prompt,
+         "-f",
+         screenshot_path,
+         "--model",
+         VISION_MODEL,
+         "--format",
+         "json",
+     ]
     # DEBUG: For step 1, write the exact command to a file for manual reproduction
     if step_num == 1:
         try:
@@ -987,16 +481,7 @@ async def _run_vision_opencode(
                     "stderr_text": stderr_text,
                     "returncode": process.returncode,
                 }
-            # FIX: Früher wurde JEDER timeout-gekillte Call mit non-leerem Output als
-            # Erfolg gewertet. Das führte zu zerhacktem JSON und Parse-Fehlern, die
-            # als RETRY durchgewunken wurden. Jetzt nur noch akzeptieren wenn der
-            # Output ein vollständiges JSON-Objekt enthält.
-            if (
-                full_text
-                and process.returncode in (124, 137)
-                and "{" in full_text
-                and full_text.rstrip().endswith("}")
-            ):
+            if full_text and process.returncode in (124, 137):
                 return {
                     "ok": True,
                     "auth_failure": False,
@@ -1747,31 +1232,12 @@ async def dom_prescan():
         )
         if isinstance(snapshot, dict) and "tree" in snapshot:
             tree = snapshot["tree"]
-            # Nur interaktive Elemente (mit @eX Refs) extrahieren.
-            # WHY: Früher waren es nur 20 Einträge — Surveys mit 5-10 Radio-Buttons
-            #      plus Header/Footer-Links sprengten das schnell. Jetzt 40 Einträge
-            #      mit Priorisierung auf Radio/Button/Input-Elemente.
+            # Nur interaktive Elemente (mit @eX Refs) extrahieren
             interactive = [l.strip() for l in tree.splitlines() if "@e" in l]
-
-            def _a11y_priority(line: str) -> int:
-                low = line.lower()
-                if "button" in low and any(
-                    w in low for w in ("weiter", "nächste", "naechste", "continue", "next", "submit", "absenden")
-                ):
-                    return 100
-                if "[radio" in low or "[checkbox" in low:
-                    return 90
-                if "[button" in low:
-                    return 80
-                if "[link" in low:
-                    return 40
-                return 30
-
-            interactive.sort(key=_a11y_priority, reverse=True)
             if interactive:
                 snapshot_info = (
-                    "ACCESSIBILITY-TREE REFS (nutzbar mit click_ref, priorisiert):\n"
-                    + "\n".join(interactive[:40])
+                    "ACCESSIBILITY-TREE REFS (nutzbar mit click_ref):\n"
+                    + "\n".join(interactive[:20])
                 )
             audit(
                 "action",
@@ -1781,81 +1247,37 @@ async def dom_prescan():
         audit("error", message=f"Snapshot fehlgeschlagen: {e}")
 
     # 2. Echte HTML-Elemente mit Klick-Potential scannen
-    # WHY: Früher waren es max 25 Elemente ohne Sichtbarkeits-Filter und ohne
-    #      Priorisierung. Surveys haben oft 5-20 Radio-Buttons + Weiter-Button;
-    #      wurden die ersten 25 Header-Links gescannt, war der Weiter-Button nicht dabei.
-    # FIX: Sichtbarkeits-Filter (im Viewport, nicht versteckt), Priorisierung auf
-    #      Survey-relevante Elemente (Weiter/Nächste/Submit-Buttons zuerst),
-    #      sowie Unterstützung für Form-Elemente (input, select, textarea, radio).
     clickable_info = ""
     try:
         js_scan = """
         (function() {
-            function isVisible(el) {
-                if (!el || !el.getBoundingClientRect) return false;
-                if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+            var results = [];
+            var all = document.querySelectorAll('[onclick], [role="button"], a[href], button, input[type="submit"], [style*="cursor: pointer"], .survey-item, .survey-card, [class*="card"], [class*="survey"]');
+            for (var i = 0; i < Math.min(all.length, 25); i++) {
+                var el = all[i];
                 var r = el.getBoundingClientRect();
-                if (r.width < 5 || r.height < 5) return false;
-                var style = getComputedStyle(el);
-                if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
-                return true;
-            }
-            function buildSel(el) {
-                if (el.id) return '#' + el.id;
-                if (el.getAttribute && el.getAttribute('data-testid')) return '[data-testid="' + el.getAttribute('data-testid') + '"]';
-                if (el.getAttribute && el.getAttribute('name')) return el.tagName.toLowerCase() + '[name="' + el.getAttribute('name') + '"]';
-                if (el.className && typeof el.className === 'string') {
-                    var cls = el.className.split(' ').filter(function(c){return c.length > 0 && !/^(ng-|is-|has-)/.test(c);})[0];
-                    if (cls) return el.tagName.toLowerCase() + '.' + cls;
+                if (r.width < 5 || r.height < 5) continue;
+                var sel = '';
+                if (el.id) sel = '#' + el.id;
+                else if (el.className && typeof el.className === 'string') {
+                    var cls = el.className.split(' ').filter(function(c) { return c.length > 0; })[0];
+                    if (cls) sel = el.tagName.toLowerCase() + '.' + cls;
                 }
-                return el.tagName.toLowerCase();
-            }
-            function priority(el, text) {
-                var t = (text || '').toLowerCase();
-                // Survey-Weiter-Buttons absolut höchste Prio
-                if (/(weiter|nächste|naechste|continue|next|submit|absenden|fertig|bestätigen|bestaetigen)/i.test(t)) return 100;
-                if (el.tagName === 'BUTTON' && t.length > 0 && t.length < 30) return 80;
-                if (el.getAttribute && el.getAttribute('type') === 'submit') return 75;
-                if (el.tagName === 'A' && el.getAttribute && el.getAttribute('href')) return 50;
-                if (el.className && /survey-item|survey-card/.test(el.className + '')) return 90;
-                if (el.tagName === 'INPUT') return 60;
-                return 30;
-            }
-            var selectors = [
-                'button', 'a[href]', 'input', 'select', 'textarea',
-                '[role="button"]', '[role="link"]', '[role="radio"]', '[role="checkbox"]',
-                '[onclick]', '[style*="cursor: pointer"]', '[style*="cursor:pointer"]',
-                '.survey-item', '.survey-card', '[class*="card"]', '[class*="survey"]',
-                '[class*="answer"]', '[class*="option"]', 'label'
-            ];
-            var raw = document.querySelectorAll(selectors.join(','));
-            var seen = new Set();
-            var scored = [];
-            for (var i = 0; i < raw.length; i++) {
-                var el = raw[i];
-                if (seen.has(el)) continue;
-                seen.add(el);
-                if (!isVisible(el)) continue;
-                var r = el.getBoundingClientRect();
-                var text = (el.textContent || el.value || el.placeholder || '').substring(0, 80).replace(/\\s+/g, ' ').trim();
-                scored.push({
-                    _p: priority(el, text),
-                    sel: buildSel(el),
+                if (!sel) sel = el.tagName.toLowerCase();
+                results.push({
+                    sel: sel,
                     tag: el.tagName,
                     id: el.id || '',
-                    type: el.type || '',
-                    role: el.getAttribute ? (el.getAttribute('role') || '') : '',
-                    name: el.getAttribute ? (el.getAttribute('name') || '') : '',
                     cls: (el.className + '').substring(0, 80),
-                    text: text,
+                    text: (el.textContent || '').substring(0, 60).replace(/\\n/g, ' ').trim(),
                     x: Math.round(r.x + r.width/2),
                     y: Math.round(r.y + r.height/2),
                     w: Math.round(r.width),
-                    h: Math.round(r.height)
+                    h: Math.round(r.height),
+                    cursor: getComputedStyle(el).cursor
                 });
             }
-            scored.sort(function(a, b){ return b._p - a._p; });
-            return scored.slice(0, 40).map(function(o){ delete o._p; return o; });
+            return results;
         })();
         """
         scan_result = await execute_bridge(
@@ -1869,15 +1291,12 @@ async def dom_prescan():
                     selector = el.get("sel", "?")
                     if el.get("id"):
                         selector = f"#{el['id']}"
-                    text = el.get("text", "")[:50]
-                    tag = el.get("tag", "")
-                    role = el.get("role", "") or el.get("type", "")
-                    extras = f"[{tag}" + (f" role={role}" if role else "") + "]"
+                    text = el.get("text", "")[:40]
                     lines.append(
-                        f'  - selector="{selector}" text="{text}" {extras} pos=({el.get("x")},{el.get("y")})'
+                        f'  - selector="{selector}" text="{text}" pos=({el.get("x")},{el.get("y")}) size={el.get("w")}x{el.get("h")} cursor={el.get("cursor")}'
                     )
                 clickable_info = (
-                    "KLICKBARE ELEMENTE (priorisiert nach Survey-Relevanz):\n"
+                    "KLICKBARE ELEMENTE AUF DER SEITE (ECHTE CSS-Selektoren!):\n"
                     + "\n".join(lines)
                 )
                 audit(
@@ -1904,90 +1323,23 @@ async def dom_prescan():
 # ============================================================================
 
 
-# ============================================================================
-# VISION RESPONSE CACHE — schnellere Reaktion auf statische Seiten
-# ============================================================================
-# WHY: Viele Schritte passieren auf derselben Seite (z.B. Survey-Ladebildschirm,
-#      Spinner, Cookie-Banner). Wenn derselbe Screenshot-Hash mit derselben
-#      action_desc kurz nach einem bereits beantworteten Vision-Call auftaucht,
-#      können wir die Antwort reusen statt erneut das Modell zu befragen.
-# SICHERHEIT: Nur wenn letzte Entscheidung PROCEED war UND innerhalb 15s.
-#             Niemals für RETRY/STOP (da wollen wir neu schauen).
-_VISION_CACHE: dict[str, tuple[float, dict]] = {}
-VISION_CACHE_TTL = float(os.environ.get("HEYPIGGY_VISION_CACHE_TTL", "15.0"))
-
-
-def _vision_cache_key(img_hash: str, action_desc: str, step_num: int) -> str:
-    # step_num NICHT in den Key — wir wollen ja bewusst über Schritte hinweg cachen
-    return f"{img_hash}::{action_desc[:80]}"
-
-
-def _vision_cache_get(img_hash: str, action_desc: str, step_num: int):
-    if not img_hash:
-        return None
-    key = _vision_cache_key(img_hash, action_desc, step_num)
-    entry = _VISION_CACHE.get(key)
-    if not entry:
-        return None
-    ts, decision = entry
-    if time.time() - ts > VISION_CACHE_TTL:
-        _VISION_CACHE.pop(key, None)
-        return None
-    # Nur PROCEED-Entscheidungen cachen — RETRY/STOP immer neu bewerten
-    if decision.get("verdict") != "PROCEED":
-        return None
-    return decision
-
-
-def _vision_cache_put(img_hash: str, action_desc: str, step_num: int, decision: dict):
-    if not img_hash or decision.get("verdict") != "PROCEED":
-        return
-    key = _vision_cache_key(img_hash, action_desc, step_num)
-    _VISION_CACHE[key] = (time.time(), dict(decision))
-    # Cache-Größe begrenzen (FIFO-ish)
-    if len(_VISION_CACHE) > 64:
-        oldest = min(_VISION_CACHE.items(), key=lambda kv: kv[1][0])[0]
-        _VISION_CACHE.pop(oldest, None)
-
-
 async def ask_vision(
-    screenshot_path: str,
-    action_desc: str,
-    expected: str,
-    step_num: int,
-    *,
-    img_hash: str | None = None,
+    screenshot_path: str, action_desc: str, expected: str, step_num: int
 ):
     """
-    Sendet einen Screenshot + DOM-Kontext an das konfigurierte Vision-Modell.
-    Standard-Backend: NVIDIA NIM `meta/llama-3.2-90b-vision-instruct` (free tier).
-    Fallback: OpenCode CLI mit Gemini 3 Flash (wenn NVIDIA_API_KEY fehlt).
+    Sendet einen Screenshot + DOM-Kontext an Gemini 3 Flash.
     WHY: KEIN EINZIGER KLICK ohne dass das Vision-Modell den Bildschirm gesehen hat.
     CONSEQUENCES: Bei Parse-Fehler wird RETRY zurückgegeben (nie ein Crash).
-
-    OPTIMIERUNGEN v3.2 PRO:
-    - Cache: Identischer screenshot_hash + action_desc innerhalb TTL → Antwort reusen
-    - Parallel: DOM-Prescan + Profile-Context in parallel (bisher sequentiell)
     """
-    # ---- CACHE ----
-    if img_hash:
-        cached = _vision_cache_get(img_hash, action_desc, step_num)
-        if cached is not None:
-            audit(
-                "vision_check",
-                step=step_num,
-                message=f"Vision-Cache HIT (hash={img_hash[:12]}) → {cached.get('verdict')}",
-            )
-            return cached
+    # DOM Pre-Scan: Echte Selektoren VOR dem Vision-Call holen!
+    dom_context = await dom_prescan()
 
-    # ---- PARALLEL CONTEXT GATHERING ----
-    # DOM Pre-Scan und Profil-Context parallel vorbereiten (spart 200-500ms/Step).
-    dom_task = asyncio.create_task(dom_prescan())
-    profile_context = _build_profile_context()  # synchron, schnell
-    dom_context = await dom_task
+    # Profil-Kontext aus gespeichertem User-Profil laden
+    # WHY: Gemini muss wissen wer der User ist um Profil-Fragen korrekt zu beantworten.
+    #      Ohne Profil würde Gemini zufällig wählen → falsche Region, falscher Name etc.
+    profile_context = _build_profile_context()
 
     prompt = f"""Du bist der Vision Gate Controller der OpenSIN-Bridge.
-Du siehst einen Browser-Screenshot PLUS DOM-Analyse und entscheidest die nächste Aktion.
 
 KONTEXT:
 - Letzte Aktion: '{action_desc}'
@@ -2100,20 +1452,7 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
   "progress": true,
   "next_action": "click_ref",
   "next_params": {{"ref": "@e9"}}
-}}
-
-BEISPIELE (für deine Orientierung):
-
-Beispiel 1 — Radio-Frage sichtbar:
-{{"verdict":"PROCEED","page_state":"survey_active","reason":"Radio-Frage 'Wie oft kaufst du online?' sichtbar, wähle mittlere Option @e12","progress":true,"next_action":"click_ref","next_params":{{"ref":"@e12"}}}}
-
-Beispiel 2 — Nach Radio-Klick, Weiter-Button sichtbar:
-{{"verdict":"PROCEED","page_state":"survey_active","reason":"Antwort gewählt, Weiter-Button #submit-button-cpx sichtbar","progress":true,"next_action":"click_element","next_params":{{"selector":"#submit-button-cpx"}}}}
-
-Beispiel 3 — Cookie-Banner blockiert:
-{{"verdict":"PROCEED","page_state":"dashboard","reason":"Cookie-Consent Banner blockiert UI, klicke 'Alle akzeptieren' @e3","progress":false,"next_action":"click_ref","next_params":{{"ref":"@e3"}}}}
-
-JETZT antworte. Gib AUSSCHLIESSLICH das JSON-Objekt aus. Beginne deine Antwort direkt mit `{{`."""
+}}"""
 
     run_result = await run_vision_model(
         prompt,
@@ -2154,15 +1493,6 @@ JETZT antworte. Gib AUSSCHLIESSLICH das JSON-Objekt aus. Beginne deine Antwort d
                 if full_text.startswith("json"):
                     full_text = full_text[4:].strip()
 
-        # FIX: Robust-Fallback — erste gültige {...}-Klammer extrahieren wenn
-        # das Modell Prosa um das JSON herum schreibt.
-        # WHY: Gemini hält sich nicht immer zuverlässig an "nur JSON". Statt
-        #      sofort RETRY zu werfen, versuchen wir das JSON aus dem Blob zu ziehen.
-        if not full_text.lstrip().startswith("{"):
-            match = re.search(r"\{[\s\S]*\}", full_text)
-            if match:
-                full_text = match.group(0)
-
         result = json.loads(full_text)
         audit(
             "vision_check",
@@ -2172,9 +1502,6 @@ JETZT antworte. Gib AUSSCHLIESSLICH das JSON-Objekt aus. Beginne deine Antwort d
             reason=result.get("reason", "")[:150],
             next_action=result.get("next_action"),
         )
-        # Vision-Cache für identische Screenshots in Folge
-        if img_hash:
-            _vision_cache_put(img_hash, action_desc, step_num, result)
         return result
 
     except json.JSONDecodeError as e:
@@ -2375,19 +1702,28 @@ MAX_CLICK_ESCALATIONS = 5  # click → ghost → KEYBOARD → vision → coords
 _ESC_STEP = 0
 
 
-async def _verify_click_effect(before_url: str, before_title: str) -> bool:
+async def _vision_gate_inside_escalation(
+    step_label: str, action_done: str, expected: str
+) -> dict:
     """
-    Schnelle DOM-basierte Verifikation ob ein Klick tatsächlich Wirkung hatte.
-    WHY: Früher wurde nach JEDER Eskalationsstufe ein neuer Vision-Call gefeuert
-         (`_vision_gate_inside_escalation`). Das verdreifacht bis verzehnfacht die
-         Vision-Calls pro Schritt, triggert Rate-Limits und macht den Lauf 5-10x
-         langsamer. DOM-Check (URL/Title/page_diff) ist in <500ms erledigt und
-         liefert eine zuverlässige Antwort ob das Klick-Event gegriffen hat.
-    CONSEQUENCES: Wenn URL/Title sich geändert haben ODER der Accessibility-Tree
-                  Änderungen meldet, ist der Klick erfolgreich. Sonst False.
+    Macht Screenshot + Vision-Check INNERHALB der Eskalationskette.
+    Gibt das volle Vision-Decision-Dict zurück (verdict, next_action, next_params, page_state).
+    WHY: Das Mandat verlangt Vision VOR JEDER AKTION — auch vor jeder Eskalationsstufe.
+    CONSEQUENCES: Ohne diesen Gate kann die Eskalation blind 5 Aktionen hintereinander
+    feuern ohne zu wissen ob der Klick überhaupt sinnvoll war.
     """
-    dom_check = await dom_verify_change(before_url, before_title)
-    return bool(dom_check.get("changed"))
+    global _ESC_STEP
+    _ESC_STEP += 1
+    img_path, _ = await take_screenshot(_ESC_STEP * 1000, label=f"esc_{step_label}")
+    if not img_path:
+        # Screenshot fehlgeschlagen → pessimistisch RETRY zurückgeben
+        return {
+            "verdict": "RETRY",
+            "next_action": "none",
+            "next_params": {},
+            "page_state": "unknown",
+        }
+    return await ask_vision(img_path, action_done, expected, _ESC_STEP * 1000)
 
 
 async def escalating_click(
@@ -2461,8 +1797,18 @@ async def escalating_click(
                     audit("error", message=f"click_ref failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    if await _verify_click_effect(before_url, before_title):
-                        audit("success", method="click_ref", message="Klick bestätigt via DOM")
+                    esc_decision = await _vision_gate_inside_escalation(
+                        f"after_click_ref_{i}",
+                        f"click_ref auf {ref[:60]}",
+                        "Seite hat reagiert",
+                    )
+                    audit(
+                        "vision_check",
+                        method="click_ref",
+                        verdict=esc_decision.get("verdict"),
+                        page_state=esc_decision.get("page_state"),
+                    )
+                    if esc_decision.get("verdict") == "PROCEED":
                         return True
                 continue
 
@@ -2472,8 +1818,18 @@ async def escalating_click(
                     audit("error", message=f"click_element failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    if await _verify_click_effect(before_url, before_title):
-                        audit("success", method="click_element", message="Klick bestätigt via DOM")
+                    esc_decision = await _vision_gate_inside_escalation(
+                        f"after_click_element_{i}",
+                        f"click_element auf {selector[:60]}",
+                        "Seite hat reagiert",
+                    )
+                    audit(
+                        "vision_check",
+                        method="click_element",
+                        verdict=esc_decision.get("verdict"),
+                        page_state=esc_decision.get("page_state"),
+                    )
+                    if esc_decision.get("verdict") == "PROCEED":
                         return True
                 continue
 
@@ -2513,8 +1869,18 @@ async def escalating_click(
                     audit("error", message=f"ghost_click failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    if await _verify_click_effect(before_url, before_title):
-                        audit("success", method="ghost_click", message="Klick bestätigt via DOM")
+                    esc_decision = await _vision_gate_inside_escalation(
+                        f"after_ghost_click_{i}",
+                        f"ghost_click auf {sel[:60]}",
+                        "Seite hat reagiert",
+                    )
+                    audit(
+                        "vision_check",
+                        method="ghost_click",
+                        verdict=esc_decision.get("verdict"),
+                        page_state=esc_decision.get("page_state"),
+                    )
+                    if esc_decision.get("verdict") == "PROCEED":
                         return True
                 continue
 
@@ -2540,13 +1906,33 @@ async def escalating_click(
                 await asyncio.sleep(0.3)
                 await keyboard_action(["Enter"], selector=sel)
                 await asyncio.sleep(0.8)
-                if await _verify_click_effect(before_url, before_title):
-                    audit("success", method="keyboard_enter", message="Enter bestätigt via DOM")
+                esc_decision = await _vision_gate_inside_escalation(
+                    f"after_keyboard_enter_{i}",
+                    f"keyboard Enter auf {sel[:60]}",
+                    "Seite hat reagiert",
+                )
+                audit(
+                    "vision_check",
+                    method="keyboard_enter",
+                    verdict=esc_decision.get("verdict"),
+                    page_state=esc_decision.get("page_state"),
+                )
+                if esc_decision.get("verdict") == "PROCEED":
                     return True
                 await keyboard_action(["Space"], selector=sel)
                 await asyncio.sleep(0.8)
-                if await _verify_click_effect(before_url, before_title):
-                    audit("success", method="keyboard_space", message="Space bestätigt via DOM")
+                esc_decision2 = await _vision_gate_inside_escalation(
+                    f"after_keyboard_space_{i}",
+                    f"keyboard Space auf {sel[:60]}",
+                    "Seite hat reagiert",
+                )
+                audit(
+                    "vision_check",
+                    method="keyboard_space",
+                    verdict=esc_decision2.get("verdict"),
+                    page_state=esc_decision2.get("page_state"),
+                )
+                if esc_decision2.get("verdict") == "PROCEED":
                     return True
                 continue
 
@@ -2556,8 +1942,18 @@ async def escalating_click(
                     audit("error", message=f"vision_click failed: {result['error']}")
                 else:
                     await asyncio.sleep(0.8)
-                    if await _verify_click_effect(before_url, before_title):
-                        audit("success", method="vision_click", message="Klick bestätigt via DOM")
+                    esc_decision = await _vision_gate_inside_escalation(
+                        f"after_vision_click_{i}",
+                        f"vision_click '{description[:40]}'",
+                        "Seite hat reagiert",
+                    )
+                    audit(
+                        "vision_check",
+                        method="vision_click",
+                        verdict=esc_decision.get("verdict"),
+                        page_state=esc_decision.get("page_state"),
+                    )
+                    if esc_decision.get("verdict") == "PROCEED":
                         return True
                 continue
 
@@ -2588,8 +1984,18 @@ async def escalating_click(
                     audit("error", message=f"coord_click failed: {result}")
                 else:
                     await asyncio.sleep(0.8)
-                    if await _verify_click_effect(before_url, before_title):
-                        audit("success", method="coord_click", message="Coord-Klick bestätigt via DOM")
+                    esc_decision = await _vision_gate_inside_escalation(
+                        f"after_coord_click_{i}",
+                        f"coord_click ({cx},{cy})",
+                        "Seite hat reagiert",
+                    )
+                    audit(
+                        "vision_check",
+                        method="coord_click",
+                        verdict=esc_decision.get("verdict"),
+                        page_state=esc_decision.get("page_state"),
+                    )
+                    if esc_decision.get("verdict") == "PROCEED":
                         return True
                 continue
 
@@ -2677,41 +2083,9 @@ class VisionGateController:
         self.consecutive_retries = 0
         self.no_progress_count = 0
         self.last_screenshot_hash = None
-        # failed_selectors jetzt als dict {selector: fail_count} statt set().
-        # WHY: Ein Selektor der auf Seite A scheitert kann auf Seite B funktionieren.
-        # Wir lassen ihn nach 3 Fails global sperren, und resetten bei page_state change.
-        self.failed_selectors: dict[str, int] = {}
+        self.failed_selectors = set()
         self.last_page_state = None
         self.successful_actions = 0
-        # Reset-Tracking
-        self.last_url = None
-        # Action-Loop-Detection: rotierender Fingerprint-Ringbuffer der letzten Aktionen
-        # WHY: Wenn der Agent 3x hintereinander dieselbe (hash, action, selector)
-        #      Kombi versucht, steckt er in einer Schleife und muss entschlockt werden.
-        self._action_fingerprints: list[str] = []
-
-    def fingerprint(self, img_hash: str, action: str, params: dict) -> str:
-        """Erzeugt einen Fingerprint für Action-Loop-Detection."""
-        sel = params.get("selector") or params.get("ref") or params.get("description", "")
-        return f"{img_hash or '?'}::{action}::{str(sel)[:60]}"
-
-    def record_action(self, img_hash: str, action: str, params: dict) -> bool:
-        """
-        Speichert Fingerprint und meldet ob wir in einem Loop stecken.
-        Rückgabe: True wenn Loop erkannt (≥3 identische Aktionen in Folge).
-        """
-        fp = self.fingerprint(img_hash, action, params)
-        self._action_fingerprints.append(fp)
-        if len(self._action_fingerprints) > 8:
-            self._action_fingerprints = self._action_fingerprints[-8:]
-        # Zähle identische Fingerprints in den letzten 5 Einträgen
-        recent = self._action_fingerprints[-5:]
-        identical = recent.count(fp)
-        return identical >= 3
-
-    def clear_action_history(self):
-        """Clear nach Unstick, damit neuer Strategieversuch nicht sofort als Loop zählt."""
-        self._action_fingerprints = []
 
     def should_continue(self) -> bool:
         """Prüft ob der Worker weitermachen darf."""
@@ -2761,21 +2135,10 @@ class VisionGateController:
             self.no_progress_count = 0
             self.last_screenshot_hash = screenshot_hash
 
-        # Page-State-Tracking — bei State-Wechsel `failed_selectors` zurücksetzen
-        # WHY: Ein Selektor der auf dem Login-Screen fehlschlägt, kann auf dem
-        #      Dashboard völlig legitim sein. Ohne Reset sperren wir uns selbst aus.
+        # Page-State-Tracking
         if page_state:
             if page_state != self.last_page_state:
                 audit("state_change", old=self.last_page_state, new=page_state)
-                if self.failed_selectors:
-                    audit(
-                        "state_change",
-                        message=f"Page-State change → failed_selectors reset ({len(self.failed_selectors)} Einträge)",
-                    )
-                    self.failed_selectors = {}
-                # Captcha-Retry-Counter bei State-Wechsel ebenfalls resetten
-                global _captcha_attempt_count
-                _captcha_attempt_count = 0
             self.last_page_state = page_state
 
         # Erfolgs-Tracking
@@ -2783,13 +2146,13 @@ class VisionGateController:
             self.successful_actions += 1
 
     def add_failed_selector(self, selector: str):
-        """Merkt sich einen fehlgeschlagenen Selektor. Erst nach 3 Fails gesperrt."""
+        """Merkt sich einen fehlgeschlagenen Selektor um ihn nicht nochmal zu versuchen."""
         if selector:
-            self.failed_selectors[selector] = self.failed_selectors.get(selector, 0) + 1
+            self.failed_selectors.add(selector)
 
     def is_selector_failed(self, selector: str) -> bool:
-        """Ein Selektor gilt erst nach 3 Fehlversuchen als dauerhaft tot."""
-        return self.failed_selectors.get(selector, 0) >= 3
+        """Prüft ob ein Selektor bereits fehlgeschlagen ist."""
+        return selector in self.failed_selectors
 
     def mark_dom_progress(self):
         """
@@ -2812,109 +2175,22 @@ class VisionGateController:
 # ============================================================================
 
 
-# Mapping: Feldnamen-Pattern → Profil-Schlüssel (mit Fallback-Priorität)
-# WHY: Sparen Vision-Calls bei offensichtlichen Formularen (Vorname, Stadt, etc.)
-#      UND vermeidet dass Vision halluziniert ("Max Mustermann"), wenn wir im
-#      Profil echte Daten haben.
-_PROFILE_FIELD_PATTERNS = [
-    # (regex, [profile_keys in priority order])
-    (r"(first[-_ ]?name|vorname|given[-_ ]?name|firstname|fname)", ["first_name", "name"]),
-    (r"(last[-_ ]?name|nachname|surname|family[-_ ]?name|lastname|lname)", ["last_name"]),
-    (r"(full[-_ ]?name|^name$|displayname|your[-_ ]?name)", ["name", "first_name"]),
-    (r"(city|stadt|ort|town)", ["city"]),
-    (r"(region|bundesland|state|province)", ["region"]),
-    (r"(country|land|nation)", ["country"]),
-    (r"(postal[-_ ]?code|zip|plz|postleit)", ["zip", "postal_code"]),
-    (r"(phone|telefon|mobile|handy)", ["phone"]),
-    (r"(street|straße|strasse|address|adresse)", ["street", "address"]),
-    (r"(birth|geburt|dob|date[-_ ]?of[-_ ]?birth)", ["birth_date", "dob"]),
-    (r"(gender|geschlecht|sex)", ["gender"]),
-    (r"(company|firma|employer|arbeitgeber)", ["company"]),
-    (r"(occupation|beruf|job[-_ ]?title)", ["occupation", "job"]),
-]
-
-
-def _resolve_profile_value(field_hint: str) -> str | None:
-    """
-    Versucht einen Profil-Wert aus einem Feld-Hint (selector, name, placeholder) zu ziehen.
-    Rückgabe: echter Profil-String oder None wenn kein Match.
-    """
-    if not field_hint or not USER_PROFILE:
-        return None
-    hint_low = field_hint.lower()
-    for pattern, keys in _PROFILE_FIELD_PATTERNS:
-        if re.search(pattern, hint_low):
-            for k in keys:
-                val = USER_PROFILE.get(k)
-                if val:
-                    return str(val)
-    return None
-
-
 def inject_credentials(params: dict, email: str, pwd: str) -> dict:
     """
-    Ersetzt <EMAIL>, <PASSWORD> UND erkennt Profil-Felder automatisch.
+    Ersetzt <EMAIL> und <PASSWORD> Platzhalter mit echten Credentials.
     WHY: Die AI darf NIEMALS echte Passwörter sehen oder ausgeben.
-         Profil-Autofill: Wenn Vision "type_text" auf einem erkennbaren Feld
-         vorschlägt (Vorname, Stadt, etc.), ziehen wir den Wert proaktiv aus
-         dem Profil statt dass Vision halluzinierte Werte einsetzt.
-    CONSEQUENCES:
-      - <EMAIL>/<PASSWORD>/<NAME>/<CITY>/etc. Platzhalter werden ersetzt
-      - Bei passendem Feldnamen (selector/name/placeholder) im Profil gibt's
-        automatisch den richtigen Wert — auch wenn Vision keinen Platzhalter nutzt
+    CONSEQUENCES: Nur Platzhalter werden ersetzt, alles andere bleibt unverändert.
     """
     if "text" not in params:
         return params
 
     text = params["text"]
-    text_upper = text.upper() if isinstance(text, str) else ""
-
-    # 1. Credentials (höchste Prio)
-    if text == "<EMAIL>" or text_upper == "EMAIL":
+    if text == "<EMAIL>" or text.upper() == "EMAIL":
         params["text"] = email or ""
         audit("action", message="Credential injected: EMAIL (redacted)")
-        return params
-    if text == "<PASSWORD>" or text_upper == "PASSWORD":
+    elif text == "<PASSWORD>" or text.upper() == "PASSWORD":
         params["text"] = pwd or ""
         audit("action", message="Credential injected: PASSWORD (redacted)")
-        return params
-
-    # 2. Explizite Profil-Platzhalter à la <NAME>, <CITY>, <REGION>, <COUNTRY>
-    m = re.fullmatch(r"<([A-Z_]+)>", text or "")
-    if m:
-        key = m.group(1).lower()
-        # Spezielle Keys mappen
-        alias = {
-            "name": "name",
-            "firstname": "first_name",
-            "first_name": "first_name",
-            "lastname": "last_name",
-            "last_name": "last_name",
-            "city": "city",
-            "region": "region",
-            "country": "country",
-            "gender": "gender",
-            "zip": "zip",
-            "postal": "zip",
-            "phone": "phone",
-        }.get(key, key)
-        val = USER_PROFILE.get(alias)
-        if val:
-            params["text"] = str(val)
-            audit("action", message=f"Profile injected: {alias}")
-            return params
-
-    # 3. Feldname-basierte Auto-Erkennung (wenn Vision nichts injected hat,
-    #    aber der Selektor/name einen klaren Hint enthält).
-    # WHY: Verhindert dass Vision "Max Mustermann" halluziniert obwohl wir das
-    #      echte Profil haben.
-    field_hint = " ".join(
-        str(params.get(k, "")) for k in ("selector", "name", "placeholder", "label")
-    )
-    profile_val = _resolve_profile_value(field_hint)
-    if profile_val and (not text or text_upper in ("AUTO", "PROFILE", "<AUTO>")):
-        params["text"] = profile_val
-        audit("action", message=f"Profile autofill: hint='{field_hint[:40]}' → profile value injected")
 
     return params
 
@@ -3074,50 +2350,28 @@ async def main():
             audit("stop", reason="Bridge nicht erreichbar, Abbruch")
             break
 
-        # ---- SCREENSHOT + PAGE-INFO PARALLEL ----
-        # WHY: take_screenshot und get_page_info sind beide Bridge-Roundtrips (je ~300-600ms).
-        # Parallel gestartet sparen wir eine volle Roundtrip-Zeit pro Schritt.
-        screenshot_task = asyncio.create_task(
-            take_screenshot(gate.total_steps + 1, label=action_desc[:20])
+        # ---- SCREENSHOT ----
+        img_path, img_hash = await take_screenshot(
+            gate.total_steps + 1, label=action_desc[:20]
         )
-        pageinfo_task = asyncio.create_task(
-            execute_bridge("get_page_info", _tab_params())
-        )
-        img_path, img_hash = await screenshot_task
-        try:
-            pi_result = await pageinfo_task
-            pre_url = pi_result.get("url", "") if isinstance(pi_result, dict) else ""
-            pre_title = pi_result.get("title", "") if isinstance(pi_result, dict) else ""
-        except Exception:
-            pre_url, pre_title = "", ""
         if not img_path:
             gate.record_step("RETRY", None)
             await human_delay(2.0, 4.0)
             continue
 
-        # THROTTLE: Minimale Pause vor Vision-Call, adaptiv steigend bei Retries.
-        # WHY: Der alte Fix-Delay von 5-10s pro Schritt machte jeden Lauf 10-20 Min
-        # lang. Bei 120 Schritten addiert sich das zu >20 Min Leerlauf.
-        # STRATEGIE: Standard 1.0-2.5s; bei aufeinanderfolgenden RETRYs steigt der
-        # Delay exponentiell (Backoff) um echte Rate-Limits zu entspannen.
-        if gate.consecutive_retries >= 2:
-            backoff = min(2.0 ** gate.consecutive_retries, 20.0)
-            await human_delay(backoff, backoff + 2.0)
-        else:
-            await human_delay(1.0, 2.5)
+        # THROTTLE: Vor Vision-Calls länger warten um Rate-Limit zu vermeiden
+        # WHY: Antigravity hat Rate-Limits; zu schnelle Calls führen zu leeren Antworten.
+        await human_delay(5.0, 10.0)
 
-        # ---- VISION CHECK (mit Cache + img_hash) ----
+        # ---- VISION CHECK ----
         decision = await ask_vision(
-            img_path,
-            action_desc,
-            expected,
-            gate.total_steps + 1,
-            img_hash=img_hash,
+            img_path, action_desc, expected, gate.total_steps + 1
         )
 
         verdict = decision.get("verdict", "RETRY")
         reason = decision.get("reason", "Kein Grund")
         page_state = decision.get("page_state", "unknown")
+page_state_machine.transition(page_state)
         next_action = decision.get("next_action", "none")
         next_params = decision.get("next_params", {})
         progress = decision.get("progress", False)
@@ -3138,61 +2392,33 @@ async def main():
         )
         print(f"{'=' * 60}\n")
 
-        # ---- CAPTCHA ERKENNUNG UND BEHANDLUNG (optimiert in v3.2) ----
-        # WHY: Früher lief detect_captcha_page() bei JEDEM Schritt (= 120x zusätzliche
-        # Bridge-Calls). Jetzt triggert das nur noch wenn Vision explizit "captcha"
-        # als page_state meldet ODER wenn wir mehrfach RETRY bekommen haben ohne
-        # Fortschritt (= potentielle Blockade). Das spart viele Bridge-Calls pro Lauf.
-        should_check_captcha = page_state == "captcha" or (
-            gate.consecutive_retries >= 2 and page_state in ("unknown", "error")
-        )
-        if should_check_captcha:
-            captcha_detected = await detect_captcha_page()
-            if captcha_detected:
-                audit("captcha", message="Captcha erkannt! Versuche Auto-Bypass...")
-                captcha_ok = await handle_captcha()
-                if captcha_ok:
-                    audit("success", message="Captcha erfolgreich behandelt!")
-                    await human_delay(2.0, 4.0)
-                    continue
-                else:
-                    audit(
-                        "error",
-                        message="Captcha-Bypass fehlgeschlagen — Vision kann helfen",
-                    )
+        # ---- CAPTCHA ERKENNUNG UND BEHANDLUNG (NEU in v3.1) ----
+        captcha_detected = await detect_captcha_page()
+        if captcha_detected:
+            audit("captcha", message="Captcha erkannt! Versuche Auto-Bypass...")
+            captcha_ok = await handle_captcha()
+            if captcha_ok:
+                audit("success", message="Captcha erfolgreich behandelt!")
+                await human_delay(2.0, 4.0)
+                continue
+            else:
+                audit(
+                    "error",
+                    message="Captcha-Bypass fehlgeschlagen — Vision kann helfen",
+                )
 
-        # ---- SURVEY ABSCHLUSS-GARANTIE (NEU in v3.1, gefixt in v3.2) ----
-        # Wenn page_state="survey_active" und Vision sagt STOP oder next=none:
-        # → Survey läuft noch! Niemals abbrechen! Aber statt einem leeren click_ref
-        #   (das tat nichts) forcieren wir jetzt eine *sinnvolle* Fallback-Aktion:
-        #   Zuerst versuchen wir einen DOM-basierten "Weiter/Nächste/Continue"-Klick
-        #   direkt hier, dann Scroll-Down um neue Fragen sichtbar zu machen.
-        if page_state == "survey_active" and (
-            verdict in ("STOP",) or next_action in ("none", "")
-        ):
+        # ---- SURVEY ABSCHLUSS-GARANTIE (NEU in v3.1) ----
+        # Wenn page_state="survey_active" und Vision sagt STOP oder none:
+        # → Survey läuft noch! Niemals abbrechen! Retry zwingend!
+        if page_state == "survey_active" and verdict in ("STOP", "none"):
             audit(
                 "warning",
-                message="SURVEY ABSCHLUSS-GARANTIE: survey_active aber Vision will stoppen → Ignoriert! Suche Weiter-Button im DOM.",
+                message="SURVEY ABSCHLUSS-GARANTIE: survey_active aber Vision will stoppen → Ignoriert! Survey MUSS fertig werden!",
             )
-            forced_click = False
-            for hint in ("Nächste", "Weiter", "Continue", "Next", "Submit", "Fertig", "Absenden"):
-                try:
-                    res = await click_visible_button_with_text(hint)
-                    if isinstance(res, dict) and res.get("result", {}).get("clicked"):
-                        audit("success", message=f"Weiter-Button via DOM-Fallback geklickt: '{hint}'")
-                        forced_click = True
-                        break
-                except Exception:
-                    continue
-            if forced_click:
-                # Klick erfolgt, warten und im nächsten Iteration weitermachen
-                await human_delay(1.0, 2.5)
-                continue
-            # Sonst: Scroll als harmloser Fallback, niemals STOP im aktiven Survey
             verdict = "PROCEED"
             decision["verdict"] = "PROCEED"
-            decision["next_action"] = "scroll_down"
-            next_action = "scroll_down"
+            decision["next_action"] = "click_ref"
+            next_action = "click_ref"
             next_params = {}
 
         # ---- STOP ----
@@ -3206,18 +2432,6 @@ async def main():
             # Bei RETRY den Selektor als fehlgeschlagen merken
             if next_params.get("selector"):
                 gate.add_failed_selector(next_params["selector"])
-            # UNSTICK: Nach 3 RETRYs in Folge erzwingen wir einen Scroll um neue
-            # Elemente in den Viewport zu bringen. Oft hängt Vision weil der
-            # Weiter-Button unter dem Fold ist und nicht im Screenshot sichtbar.
-            if gate.consecutive_retries >= 3:
-                audit(
-                    "state_change",
-                    message=f"UNSTICK: {gate.consecutive_retries} RETRYs in Folge → erzwinge scroll_down",
-                )
-                try:
-                    await handle_scroll("scroll_down")
-                except Exception:
-                    pass
             await human_delay(2.0, 4.0)
             continue
 
@@ -3255,28 +2469,6 @@ async def main():
         if next_action == "type_text" and next_params:
             next_params = inject_credentials(next_params, email, pwd)
 
-        # ---- ACTION-LOOP-DETECTION ----
-        # Wenn wir 3x hintereinander dieselbe (hash+action+selector)-Kombi sehen,
-        # steckt der Agent in einer Schleife (z.B. Klick auf unsichtbaren Button).
-        # Dann erzwingen wir einen Strategiewechsel: Scroll + neuen Screenshot.
-        if gate.record_action(img_hash, next_action, next_params):
-            audit(
-                "state_change",
-                message=f"ACTION-LOOP erkannt (3x identische Aktion): erzwinge Scroll+Unstick",
-                loop_fingerprint=gate.fingerprint(img_hash, next_action, next_params)[:80],
-            )
-            try:
-                # Alternierend nach oben/unten scrollen damit wir Elemente außerhalb
-                # des aktuellen Viewports sichtbar bekommen.
-                direction = "scroll_down" if gate.total_steps % 2 == 0 else "scroll_up"
-                await handle_scroll(direction)
-                await human_delay(1.0, 2.0)
-            except Exception:
-                pass
-            gate.clear_action_history()
-            # Skip die geplante Aktion und lass Vision beim nächsten Iteration neu bewerten
-            continue
-
         # ---- AKTION AUSFÜHREN ----
         action_desc = (
             f"{next_action} {json.dumps(next_params, ensure_ascii=False)[:80]}"
@@ -3292,10 +2484,16 @@ async def main():
             },
         )
 
-        # URL und Title für DOM-Verifikation — recyceln was wir schon parallel
-        # zum Screenshot abgerufen haben (spart eine Bridge-Roundtrip pro Schritt).
-        before_url = pre_url
-        before_title = pre_title
+        # URL und Title VOR der Aktion für DOM-Verifikation sammeln
+        before_url, before_title = "", ""
+        try:
+            pi_params = _tab_params()
+            pi = await execute_bridge("get_page_info", pi_params)
+            if isinstance(pi, dict):
+                before_url = pi.get("url", "")
+                before_title = pi.get("title", "")
+        except Exception:
+            pass
 
         try:
             # Scroll-Aktionen
@@ -3317,7 +2515,19 @@ async def main():
             # Text-Eingabe — IMMER mit exaktem tabId
             elif next_action == "type_text":
                 params = {**next_params, **_tab_params()}
-                await execute_bridge("type_text", params)
+                selector = params.get("selector", "")
+                # If selector looks like an accessibility ref (e.g., "@e19"), use click_ref + keyboard
+                if selector and (selector.startswith("@") or "@e" in selector):
+                    # Extract ref
+                    ref = selector
+                    # Focus the element via click_ref
+                    await execute_bridge("click_ref", {"ref": ref, **_tab_params()})
+                    await asyncio.sleep(0.5)
+                    # Type using keyboard (focus already on element)
+                    text = params.get("text", "")
+                    await execute_bridge("keyboard", {"keys": list(text), **_tab_params()})
+                else:
+                    await execute_bridge("type_text", params)
 
             # Navigation — IMMER mit exaktem tabId, KEIN Fallback ohne tabId
             elif next_action == "navigate":
