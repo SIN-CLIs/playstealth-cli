@@ -1,0 +1,13 @@
+# A2A-SIN-Worker-heypiggy
+
+Autonomous HeyPiggy survey worker agent for OpenSIN-AI.
+
+## Documentation
+- [README](https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy/blob/main/README.md) - Quick start, features, architecture
+- [Contributing](https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy/blob/main/CONTRIBUTING.md) - How to contribute
+
+## Key Information
+- License: MIT
+- Language: Python 3.13+
+- Models: NVIDIA Llama 3.2-11B (Primary), Gemini 3 Flash (Fallback)
+- Repo: https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy
