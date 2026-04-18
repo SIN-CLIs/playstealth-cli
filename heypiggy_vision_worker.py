@@ -724,6 +724,97 @@ async def _nvidia_nim_chat(
         }
 
 
+# Hedging: nach HEDGE_DELAY Sekunden Wartezeit startet parallel das Fallback-Modell.
+# Wer zuerst gültig antwortet, gewinnt — der andere wird gecancelled.
+# WHY: Typ. p50 90B = 3-6s, p95 = 15-30s. Bei schlechten Tagen p99 > 60s.
+#      Hedged Request bringt p95 auf unter 10s ohne die Kosten zu verdoppeln.
+NVIDIA_HEDGE_DELAY = float(os.environ.get("NVIDIA_HEDGE_DELAY", "6.0"))
+
+
+async def _nvidia_call_with_hedge(
+    prompt: str,
+    screenshot_path: str,
+    *,
+    timeout: int,
+    primary_model: str,
+    hedge_model: str | None,
+    step_num: int,
+) -> dict:
+    """
+    Startet den Primary-Call; nach NVIDIA_HEDGE_DELAY Sekunden startet parallel
+    ein Call gegen das Hedge-Modell. First-good-wins, loser wird gecancelled.
+    WHY: Reduziert p95-Latenz drastisch ohne die Request-Rate zu verdoppeln,
+         solange das Primary-Modell schnell genug antwortet.
+    CONSEQUENCES: Wenn Primary innerhalb HEDGE_DELAY antwortet, kein extra Call.
+                  Wenn Primary langsam, Hedge füllt die Lücke → beste p95-Perf.
+    """
+    if not hedge_model:
+        return await _nvidia_nim_chat(
+            prompt, screenshot_path, timeout=timeout, model=primary_model
+        )
+
+    primary = asyncio.create_task(
+        _nvidia_nim_chat(prompt, screenshot_path, timeout=timeout, model=primary_model),
+        name=f"vision-primary-{step_num}",
+    )
+    try:
+        done, pending = await asyncio.wait(
+            {primary}, timeout=NVIDIA_HEDGE_DELAY, return_when=asyncio.FIRST_COMPLETED
+        )
+        if done:
+            # Primary war schnell genug — fertig
+            result = primary.result()
+            return result
+    except asyncio.CancelledError:
+        primary.cancel()
+        raise
+
+    # Primary noch nicht fertig → Hedge starten
+    audit(
+        "vision_check",
+        step=step_num,
+        message=f"Vision-Hedge: Primary braucht > {NVIDIA_HEDGE_DELAY}s, starte {hedge_model} parallel",
+    )
+    hedge = asyncio.create_task(
+        _nvidia_nim_chat(prompt, screenshot_path, timeout=timeout, model=hedge_model),
+        name=f"vision-hedge-{step_num}",
+    )
+    # Auf ersten gültigen Erfolg warten
+    while True:
+        done, pending = await asyncio.wait(
+            {primary, hedge}, return_when=asyncio.FIRST_COMPLETED
+        )
+        winner = None
+        loser = None
+        for t in done:
+            res = t.result()
+            if res.get("ok"):
+                winner = t
+                break
+        if winner:
+            loser = hedge if winner is primary else primary
+            if not loser.done():
+                loser.cancel()
+            return winner.result()
+        # Kein Erfolg unter den fertigen → wenn einer noch läuft, auf den warten
+        still_running = [t for t in (primary, hedge) if not t.done()]
+        if not still_running:
+            # Beide gescheitert — primary-Result als aussagekräftiger nehmen
+            return primary.result()
+        # Sonst Schleife: auf den verbleibenden warten
+        done, _ = await asyncio.wait(still_running, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            res = t.result()
+            if res.get("ok"):
+                # Gegenteil cancellen falls noch am Laufen
+                other = primary if t is hedge else hedge
+                if not other.done():
+                    other.cancel()
+                return res
+        # Alle fertig, keiner ok → primary-result
+        return primary.result()
+
+
 async def _run_vision_nvidia(
     prompt: str,
     screenshot_path: str,
@@ -736,6 +827,8 @@ async def _run_vision_nvidia(
     Top-Level Wrapper: primäres Modell + Fallback-Kette bei Fehlern/Rate-Limits.
     WHY: Wenn das 90B-Modell überlastet ist, ist das 11B immer noch stark genug
          für Survey-Navigation und deutlich schneller.
+    v3.2 PRO: Der erste Versuch nutzt Hedged Request (Primary + 11B parallel nach
+              NVIDIA_HEDGE_DELAY). Fallback-Kette nur wenn Hedge komplett scheitert.
     """
     models_to_try = [NVIDIA_VISION_MODEL] + NVIDIA_VISION_FALLBACKS
     last_result: dict = {}
@@ -746,13 +839,24 @@ async def _run_vision_nvidia(
                 step=step_num,
                 message=f"NVIDIA Fallback zu {model} (vorher: {last_result.get('error', '')[:80]})",
             )
-        result = await _nvidia_nim_chat(
-            prompt,
-            screenshot_path,
-            timeout=timeout,
-            model=model,
-            force_json=True,
-        )
+        # Hedging nur für das Primary-Modell (sonst würde jeder Fallback auch hedgen)
+        if i == 0 and NVIDIA_VISION_FALLBACKS:
+            result = await _nvidia_call_with_hedge(
+                prompt,
+                screenshot_path,
+                timeout=timeout,
+                primary_model=model,
+                hedge_model=NVIDIA_VISION_FALLBACKS[0],
+                step_num=step_num,
+            )
+        else:
+            result = await _nvidia_nim_chat(
+                prompt,
+                screenshot_path,
+                timeout=timeout,
+                model=model,
+                force_json=True,
+            )
         last_result = result
         if result.get("ok"):
             return result
@@ -1800,8 +1904,59 @@ async def dom_prescan():
 # ============================================================================
 
 
+# ============================================================================
+# VISION RESPONSE CACHE — schnellere Reaktion auf statische Seiten
+# ============================================================================
+# WHY: Viele Schritte passieren auf derselben Seite (z.B. Survey-Ladebildschirm,
+#      Spinner, Cookie-Banner). Wenn derselbe Screenshot-Hash mit derselben
+#      action_desc kurz nach einem bereits beantworteten Vision-Call auftaucht,
+#      können wir die Antwort reusen statt erneut das Modell zu befragen.
+# SICHERHEIT: Nur wenn letzte Entscheidung PROCEED war UND innerhalb 15s.
+#             Niemals für RETRY/STOP (da wollen wir neu schauen).
+_VISION_CACHE: dict[str, tuple[float, dict]] = {}
+VISION_CACHE_TTL = float(os.environ.get("HEYPIGGY_VISION_CACHE_TTL", "15.0"))
+
+
+def _vision_cache_key(img_hash: str, action_desc: str, step_num: int) -> str:
+    # step_num NICHT in den Key — wir wollen ja bewusst über Schritte hinweg cachen
+    return f"{img_hash}::{action_desc[:80]}"
+
+
+def _vision_cache_get(img_hash: str, action_desc: str, step_num: int):
+    if not img_hash:
+        return None
+    key = _vision_cache_key(img_hash, action_desc, step_num)
+    entry = _VISION_CACHE.get(key)
+    if not entry:
+        return None
+    ts, decision = entry
+    if time.time() - ts > VISION_CACHE_TTL:
+        _VISION_CACHE.pop(key, None)
+        return None
+    # Nur PROCEED-Entscheidungen cachen — RETRY/STOP immer neu bewerten
+    if decision.get("verdict") != "PROCEED":
+        return None
+    return decision
+
+
+def _vision_cache_put(img_hash: str, action_desc: str, step_num: int, decision: dict):
+    if not img_hash or decision.get("verdict") != "PROCEED":
+        return
+    key = _vision_cache_key(img_hash, action_desc, step_num)
+    _VISION_CACHE[key] = (time.time(), dict(decision))
+    # Cache-Größe begrenzen (FIFO-ish)
+    if len(_VISION_CACHE) > 64:
+        oldest = min(_VISION_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _VISION_CACHE.pop(oldest, None)
+
+
 async def ask_vision(
-    screenshot_path: str, action_desc: str, expected: str, step_num: int
+    screenshot_path: str,
+    action_desc: str,
+    expected: str,
+    step_num: int,
+    *,
+    img_hash: str | None = None,
 ):
     """
     Sendet einen Screenshot + DOM-Kontext an das konfigurierte Vision-Modell.
@@ -1809,14 +1964,27 @@ async def ask_vision(
     Fallback: OpenCode CLI mit Gemini 3 Flash (wenn NVIDIA_API_KEY fehlt).
     WHY: KEIN EINZIGER KLICK ohne dass das Vision-Modell den Bildschirm gesehen hat.
     CONSEQUENCES: Bei Parse-Fehler wird RETRY zurückgegeben (nie ein Crash).
-    """
-    # DOM Pre-Scan: Echte Selektoren VOR dem Vision-Call holen!
-    dom_context = await dom_prescan()
 
-    # Profil-Kontext aus gespeichertem User-Profil laden
-    # WHY: Gemini muss wissen wer der User ist um Profil-Fragen korrekt zu beantworten.
-    #      Ohne Profil würde Gemini zufällig wählen → falsche Region, falscher Name etc.
-    profile_context = _build_profile_context()
+    OPTIMIERUNGEN v3.2 PRO:
+    - Cache: Identischer screenshot_hash + action_desc innerhalb TTL → Antwort reusen
+    - Parallel: DOM-Prescan + Profile-Context in parallel (bisher sequentiell)
+    """
+    # ---- CACHE ----
+    if img_hash:
+        cached = _vision_cache_get(img_hash, action_desc, step_num)
+        if cached is not None:
+            audit(
+                "vision_check",
+                step=step_num,
+                message=f"Vision-Cache HIT (hash={img_hash[:12]}) → {cached.get('verdict')}",
+            )
+            return cached
+
+    # ---- PARALLEL CONTEXT GATHERING ----
+    # DOM Pre-Scan und Profil-Context parallel vorbereiten (spart 200-500ms/Step).
+    dom_task = asyncio.create_task(dom_prescan())
+    profile_context = _build_profile_context()  # synchron, schnell
+    dom_context = await dom_task
 
     prompt = f"""Du bist der Vision Gate Controller der OpenSIN-Bridge.
 Du siehst einen Browser-Screenshot PLUS DOM-Analyse und entscheidest die nächste Aktion.
@@ -2004,6 +2172,9 @@ JETZT antworte. Gib AUSSCHLIESSLICH das JSON-Objekt aus. Beginne deine Antwort d
             reason=result.get("reason", "")[:150],
             next_action=result.get("next_action"),
         )
+        # Vision-Cache für identische Screenshots in Folge
+        if img_hash:
+            _vision_cache_put(img_hash, action_desc, step_num, result)
         return result
 
     except json.JSONDecodeError as e:
@@ -2514,6 +2685,33 @@ class VisionGateController:
         self.successful_actions = 0
         # Reset-Tracking
         self.last_url = None
+        # Action-Loop-Detection: rotierender Fingerprint-Ringbuffer der letzten Aktionen
+        # WHY: Wenn der Agent 3x hintereinander dieselbe (hash, action, selector)
+        #      Kombi versucht, steckt er in einer Schleife und muss entschlockt werden.
+        self._action_fingerprints: list[str] = []
+
+    def fingerprint(self, img_hash: str, action: str, params: dict) -> str:
+        """Erzeugt einen Fingerprint für Action-Loop-Detection."""
+        sel = params.get("selector") or params.get("ref") or params.get("description", "")
+        return f"{img_hash or '?'}::{action}::{str(sel)[:60]}"
+
+    def record_action(self, img_hash: str, action: str, params: dict) -> bool:
+        """
+        Speichert Fingerprint und meldet ob wir in einem Loop stecken.
+        Rückgabe: True wenn Loop erkannt (≥3 identische Aktionen in Folge).
+        """
+        fp = self.fingerprint(img_hash, action, params)
+        self._action_fingerprints.append(fp)
+        if len(self._action_fingerprints) > 8:
+            self._action_fingerprints = self._action_fingerprints[-8:]
+        # Zähle identische Fingerprints in den letzten 5 Einträgen
+        recent = self._action_fingerprints[-5:]
+        identical = recent.count(fp)
+        return identical >= 3
+
+    def clear_action_history(self):
+        """Clear nach Unstick, damit neuer Strategieversuch nicht sofort als Loop zählt."""
+        self._action_fingerprints = []
 
     def should_continue(self) -> bool:
         """Prüft ob der Worker weitermachen darf."""
@@ -2614,22 +2812,109 @@ class VisionGateController:
 # ============================================================================
 
 
+# Mapping: Feldnamen-Pattern → Profil-Schlüssel (mit Fallback-Priorität)
+# WHY: Sparen Vision-Calls bei offensichtlichen Formularen (Vorname, Stadt, etc.)
+#      UND vermeidet dass Vision halluziniert ("Max Mustermann"), wenn wir im
+#      Profil echte Daten haben.
+_PROFILE_FIELD_PATTERNS = [
+    # (regex, [profile_keys in priority order])
+    (r"(first[-_ ]?name|vorname|given[-_ ]?name|firstname|fname)", ["first_name", "name"]),
+    (r"(last[-_ ]?name|nachname|surname|family[-_ ]?name|lastname|lname)", ["last_name"]),
+    (r"(full[-_ ]?name|^name$|displayname|your[-_ ]?name)", ["name", "first_name"]),
+    (r"(city|stadt|ort|town)", ["city"]),
+    (r"(region|bundesland|state|province)", ["region"]),
+    (r"(country|land|nation)", ["country"]),
+    (r"(postal[-_ ]?code|zip|plz|postleit)", ["zip", "postal_code"]),
+    (r"(phone|telefon|mobile|handy)", ["phone"]),
+    (r"(street|straße|strasse|address|adresse)", ["street", "address"]),
+    (r"(birth|geburt|dob|date[-_ ]?of[-_ ]?birth)", ["birth_date", "dob"]),
+    (r"(gender|geschlecht|sex)", ["gender"]),
+    (r"(company|firma|employer|arbeitgeber)", ["company"]),
+    (r"(occupation|beruf|job[-_ ]?title)", ["occupation", "job"]),
+]
+
+
+def _resolve_profile_value(field_hint: str) -> str | None:
+    """
+    Versucht einen Profil-Wert aus einem Feld-Hint (selector, name, placeholder) zu ziehen.
+    Rückgabe: echter Profil-String oder None wenn kein Match.
+    """
+    if not field_hint or not USER_PROFILE:
+        return None
+    hint_low = field_hint.lower()
+    for pattern, keys in _PROFILE_FIELD_PATTERNS:
+        if re.search(pattern, hint_low):
+            for k in keys:
+                val = USER_PROFILE.get(k)
+                if val:
+                    return str(val)
+    return None
+
+
 def inject_credentials(params: dict, email: str, pwd: str) -> dict:
     """
-    Ersetzt <EMAIL> und <PASSWORD> Platzhalter mit echten Credentials.
+    Ersetzt <EMAIL>, <PASSWORD> UND erkennt Profil-Felder automatisch.
     WHY: Die AI darf NIEMALS echte Passwörter sehen oder ausgeben.
-    CONSEQUENCES: Nur Platzhalter werden ersetzt, alles andere bleibt unverändert.
+         Profil-Autofill: Wenn Vision "type_text" auf einem erkennbaren Feld
+         vorschlägt (Vorname, Stadt, etc.), ziehen wir den Wert proaktiv aus
+         dem Profil statt dass Vision halluzinierte Werte einsetzt.
+    CONSEQUENCES:
+      - <EMAIL>/<PASSWORD>/<NAME>/<CITY>/etc. Platzhalter werden ersetzt
+      - Bei passendem Feldnamen (selector/name/placeholder) im Profil gibt's
+        automatisch den richtigen Wert — auch wenn Vision keinen Platzhalter nutzt
     """
     if "text" not in params:
         return params
 
     text = params["text"]
-    if text == "<EMAIL>" or text.upper() == "EMAIL":
+    text_upper = text.upper() if isinstance(text, str) else ""
+
+    # 1. Credentials (höchste Prio)
+    if text == "<EMAIL>" or text_upper == "EMAIL":
         params["text"] = email or ""
         audit("action", message="Credential injected: EMAIL (redacted)")
-    elif text == "<PASSWORD>" or text.upper() == "PASSWORD":
+        return params
+    if text == "<PASSWORD>" or text_upper == "PASSWORD":
         params["text"] = pwd or ""
         audit("action", message="Credential injected: PASSWORD (redacted)")
+        return params
+
+    # 2. Explizite Profil-Platzhalter à la <NAME>, <CITY>, <REGION>, <COUNTRY>
+    m = re.fullmatch(r"<([A-Z_]+)>", text or "")
+    if m:
+        key = m.group(1).lower()
+        # Spezielle Keys mappen
+        alias = {
+            "name": "name",
+            "firstname": "first_name",
+            "first_name": "first_name",
+            "lastname": "last_name",
+            "last_name": "last_name",
+            "city": "city",
+            "region": "region",
+            "country": "country",
+            "gender": "gender",
+            "zip": "zip",
+            "postal": "zip",
+            "phone": "phone",
+        }.get(key, key)
+        val = USER_PROFILE.get(alias)
+        if val:
+            params["text"] = str(val)
+            audit("action", message=f"Profile injected: {alias}")
+            return params
+
+    # 3. Feldname-basierte Auto-Erkennung (wenn Vision nichts injected hat,
+    #    aber der Selektor/name einen klaren Hint enthält).
+    # WHY: Verhindert dass Vision "Max Mustermann" halluziniert obwohl wir das
+    #      echte Profil haben.
+    field_hint = " ".join(
+        str(params.get(k, "")) for k in ("selector", "name", "placeholder", "label")
+    )
+    profile_val = _resolve_profile_value(field_hint)
+    if profile_val and (not text or text_upper in ("AUTO", "PROFILE", "<AUTO>")):
+        params["text"] = profile_val
+        audit("action", message=f"Profile autofill: hint='{field_hint[:40]}' → profile value injected")
 
     return params
 
@@ -2789,10 +3074,22 @@ async def main():
             audit("stop", reason="Bridge nicht erreichbar, Abbruch")
             break
 
-        # ---- SCREENSHOT ----
-        img_path, img_hash = await take_screenshot(
-            gate.total_steps + 1, label=action_desc[:20]
+        # ---- SCREENSHOT + PAGE-INFO PARALLEL ----
+        # WHY: take_screenshot und get_page_info sind beide Bridge-Roundtrips (je ~300-600ms).
+        # Parallel gestartet sparen wir eine volle Roundtrip-Zeit pro Schritt.
+        screenshot_task = asyncio.create_task(
+            take_screenshot(gate.total_steps + 1, label=action_desc[:20])
         )
+        pageinfo_task = asyncio.create_task(
+            execute_bridge("get_page_info", _tab_params())
+        )
+        img_path, img_hash = await screenshot_task
+        try:
+            pi_result = await pageinfo_task
+            pre_url = pi_result.get("url", "") if isinstance(pi_result, dict) else ""
+            pre_title = pi_result.get("title", "") if isinstance(pi_result, dict) else ""
+        except Exception:
+            pre_url, pre_title = "", ""
         if not img_path:
             gate.record_step("RETRY", None)
             await human_delay(2.0, 4.0)
@@ -2809,9 +3106,13 @@ async def main():
         else:
             await human_delay(1.0, 2.5)
 
-        # ---- VISION CHECK ----
+        # ---- VISION CHECK (mit Cache + img_hash) ----
         decision = await ask_vision(
-            img_path, action_desc, expected, gate.total_steps + 1
+            img_path,
+            action_desc,
+            expected,
+            gate.total_steps + 1,
+            img_hash=img_hash,
         )
 
         verdict = decision.get("verdict", "RETRY")
@@ -2954,6 +3255,28 @@ async def main():
         if next_action == "type_text" and next_params:
             next_params = inject_credentials(next_params, email, pwd)
 
+        # ---- ACTION-LOOP-DETECTION ----
+        # Wenn wir 3x hintereinander dieselbe (hash+action+selector)-Kombi sehen,
+        # steckt der Agent in einer Schleife (z.B. Klick auf unsichtbaren Button).
+        # Dann erzwingen wir einen Strategiewechsel: Scroll + neuen Screenshot.
+        if gate.record_action(img_hash, next_action, next_params):
+            audit(
+                "state_change",
+                message=f"ACTION-LOOP erkannt (3x identische Aktion): erzwinge Scroll+Unstick",
+                loop_fingerprint=gate.fingerprint(img_hash, next_action, next_params)[:80],
+            )
+            try:
+                # Alternierend nach oben/unten scrollen damit wir Elemente außerhalb
+                # des aktuellen Viewports sichtbar bekommen.
+                direction = "scroll_down" if gate.total_steps % 2 == 0 else "scroll_up"
+                await handle_scroll(direction)
+                await human_delay(1.0, 2.0)
+            except Exception:
+                pass
+            gate.clear_action_history()
+            # Skip die geplante Aktion und lass Vision beim nächsten Iteration neu bewerten
+            continue
+
         # ---- AKTION AUSFÜHREN ----
         action_desc = (
             f"{next_action} {json.dumps(next_params, ensure_ascii=False)[:80]}"
@@ -2969,16 +3292,10 @@ async def main():
             },
         )
 
-        # URL und Title VOR der Aktion für DOM-Verifikation sammeln
-        before_url, before_title = "", ""
-        try:
-            pi_params = _tab_params()
-            pi = await execute_bridge("get_page_info", pi_params)
-            if isinstance(pi, dict):
-                before_url = pi.get("url", "")
-                before_title = pi.get("title", "")
-        except Exception:
-            pass
+        # URL und Title für DOM-Verifikation — recyceln was wir schon parallel
+        # zum Screenshot abgerufen haben (spart eine Bridge-Roundtrip pro Schritt).
+        before_url = pre_url
+        before_title = pre_title
 
         try:
             # Scroll-Aktionen

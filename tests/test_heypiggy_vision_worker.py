@@ -384,5 +384,98 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0], worker.NVIDIA_VISION_MODEL)
 
 
+class HeyPiggyVisionCacheTests(unittest.TestCase):
+    def setUp(self):
+        worker._VISION_CACHE.clear()
+
+    def test_cache_returns_last_proceed_for_same_hash(self):
+        decision = {
+            "verdict": "PROCEED",
+            "page_state": "survey_active",
+            "next_action": "click_element",
+            "next_params": {"selector": "#x"},
+        }
+        worker._vision_cache_put("hash123", "desc", 1, decision)
+        cached = worker._vision_cache_get("hash123", "desc", 2)
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["verdict"], "PROCEED")
+
+    def test_cache_rejects_retry_verdicts(self):
+        worker._vision_cache_put(
+            "hash123", "desc", 1, {"verdict": "RETRY", "reason": "blur"}
+        )
+        self.assertIsNone(worker._vision_cache_get("hash123", "desc", 2))
+
+    def test_cache_ignores_missing_hash(self):
+        self.assertIsNone(worker._vision_cache_get("", "desc", 1))
+
+    def test_cache_different_action_misses(self):
+        worker._vision_cache_put(
+            "hash123", "click weiter", 1, {"verdict": "PROCEED"}
+        )
+        self.assertIsNone(worker._vision_cache_get("hash123", "click andere", 2))
+
+
+class HeyPiggyActionLoopDetectorTests(unittest.TestCase):
+    def test_loop_detected_after_three_identical_actions(self):
+        gate = worker.VisionGateController()
+        params = {"selector": "#btn"}
+        self.assertFalse(gate.record_action("h1", "click_element", params))
+        self.assertFalse(gate.record_action("h1", "click_element", params))
+        self.assertTrue(gate.record_action("h1", "click_element", params))
+
+    def test_varied_actions_do_not_trigger_loop(self):
+        gate = worker.VisionGateController()
+        self.assertFalse(gate.record_action("h1", "click_element", {"selector": "#a"}))
+        self.assertFalse(gate.record_action("h1", "click_element", {"selector": "#b"}))
+        self.assertFalse(gate.record_action("h1", "click_element", {"selector": "#c"}))
+
+    def test_clear_action_history_resets_loop_detection(self):
+        gate = worker.VisionGateController()
+        params = {"selector": "#btn"}
+        gate.record_action("h1", "click_element", params)
+        gate.record_action("h1", "click_element", params)
+        gate.clear_action_history()
+        # Nach clear darf es 2 weitere geben bevor wieder Loop meldet
+        self.assertFalse(gate.record_action("h1", "click_element", params))
+        self.assertFalse(gate.record_action("h1", "click_element", params))
+
+
+class HeyPiggyProfileAutofillTests(unittest.TestCase):
+    def test_email_placeholder_still_works(self):
+        params = {"selector": "#email", "text": "<EMAIL>"}
+        out = worker.inject_credentials(params, "jeremy@example.com", "pw")
+        self.assertEqual(out["text"], "jeremy@example.com")
+
+    def test_profile_placeholder_resolves_from_profile(self):
+        with patch.object(worker, "USER_PROFILE", {"name": "Jeremy Schulze", "city": "Berlin"}):
+            params = {"selector": "#name", "text": "<NAME>"}
+            out = worker.inject_credentials(params, "", "")
+        self.assertEqual(out["text"], "Jeremy Schulze")
+
+    def test_field_hint_autofill_when_placeholder_auto(self):
+        """Wenn text='<AUTO>' und Feldname eindeutig, ziehen wir aus dem Profil."""
+        with patch.object(worker, "USER_PROFILE", {"city": "München"}):
+            params = {"selector": "#input-city", "text": "<AUTO>"}
+            out = worker.inject_credentials(params, "", "")
+        self.assertEqual(out["text"], "München")
+
+    def test_no_autofill_if_user_text_present(self):
+        """Wenn Vision bereits konkreten Text gegeben hat, nicht überschreiben."""
+        with patch.object(worker, "USER_PROFILE", {"city": "München"}):
+            params = {"selector": "#city", "text": "Hamburg"}
+            out = worker.inject_credentials(params, "", "")
+        self.assertEqual(out["text"], "Hamburg")
+
+    def test_resolve_profile_value_for_vorname(self):
+        with patch.object(worker, "USER_PROFILE", {"first_name": "Jeremy"}):
+            self.assertEqual(worker._resolve_profile_value("first-name-input"), "Jeremy")
+            self.assertEqual(worker._resolve_profile_value("vorname"), "Jeremy")
+
+    def test_resolve_profile_value_returns_none_on_mismatch(self):
+        with patch.object(worker, "USER_PROFILE", {"city": "Berlin"}):
+            self.assertIsNone(worker._resolve_profile_value("some-random-field"))
+
+
 if __name__ == "__main__":
     unittest.main()
