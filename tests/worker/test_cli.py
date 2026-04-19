@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import io
-import os
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
 
 from worker import __version__
-from worker.checkpoints import StepContext, save_checkpoint
 from worker.cli import main
 
 
@@ -98,42 +96,3 @@ def test_run_with_run_id_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         rc = main(["run", "--run-id", "custom-123", "--dry-run"])
 
     assert rc == 0
-
-
-def test_run_fresh_skips_existing_checkpoint(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    checkpoint_file = tmp_path / "heypiggy_run_old" / "checkpoint.json"
-    save_checkpoint(StepContext(run_id="old-run", state="EXECUTE_TASK_LOOP"), checkpoint_file)
-    monkeypatch.setenv("NVIDIA_API_KEY", "k")
-    monkeypatch.setenv("HEYPIGGY_ARTIFACT_BASE", str(tmp_path))
-
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        rc = main(["run", "--fresh", "--dry-run"])
-
-    assert rc == 0
-    assert os.environ.get("HEYPIGGY_RESUME_CHECKPOINT_PATH") is None
-
-
-def test_run_auto_resumes_latest_checkpoint(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    checkpoint_file = tmp_path / "heypiggy_run_resume-1" / "checkpoint.json"
-    save_checkpoint(
-        StepContext(
-            run_id="resume-1",
-            state="EXECUTE_TASK_LOOP",
-            step_index=10,
-            task_url="https://heypiggy.com/survey/abc",
-        ),
-        checkpoint_file,
-    )
-    monkeypatch.setenv("NVIDIA_API_KEY", "k")
-    monkeypatch.setenv("HEYPIGGY_ARTIFACT_BASE", str(tmp_path))
-
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        rc = main(["run", "--dry-run"])
-
-    assert rc == 0
-    assert os.environ.get("HEYPIGGY_RUN_ID") == "resume-1"
-    assert os.environ.get("HEYPIGGY_RESUME_CHECKPOINT_PATH") == str(checkpoint_file)

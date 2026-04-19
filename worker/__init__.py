@@ -3,30 +3,77 @@
 This package replaces the legacy ``heypiggy_vision_worker.py`` monolith.
 The monolith is kept as a thin backward-compat shim that imports from here.
 
-Public API is intentionally small — real consumers use :mod:`worker.cli`
-or :func:`worker.loop.run_worker`. Everything else is internal.
+Public API::
+
+    from worker import (
+        WorkerContext,
+        run_worker,
+        configure_logging,
+        get_logger,
+        retry,
+        RetryPolicy,
+        AuditLogger,
+        ShutdownController,
+        __version__,
+    )
+
+Everything not listed in :data:`__all__` is considered internal and may
+change without notice.
 """
 
 from __future__ import annotations
 
 from worker._version import __version__
-from worker.context import WorkerContext
+from worker.audit import AuditLogger
+from worker.context import WorkerContext, current_context
 from worker.exceptions import (
+    ActionBlockedError,
     ActionError,
+    ActionTimeoutError,
     BridgeError,
+    BridgeProtocolError,
+    BridgeTimeoutError,
+    BridgeUnavailableError,
     ConfigurationError,
+    ElementNotFoundError,
     PreflightError,
+    ShutdownRequested,
+    VisionCircuitOpenError,
     VisionError,
+    VisionRateLimitError,
+    VisionTimeoutError,
     WorkerError,
 )
+from worker.logging import configure_logging, get_logger
+from worker.loop import run_worker
+from worker.retry import RetryPolicy, retry
+from worker.shutdown import ShutdownController
 
 __all__ = [
+    "ActionBlockedError",
     "ActionError",
+    "ActionTimeoutError",
+    "AuditLogger",
     "BridgeError",
+    "BridgeProtocolError",
+    "BridgeTimeoutError",
+    "BridgeUnavailableError",
     "ConfigurationError",
+    "ElementNotFoundError",
     "PreflightError",
+    "RetryPolicy",
+    "ShutdownController",
+    "ShutdownRequested",
+    "VisionCircuitOpenError",
     "VisionError",
+    "VisionRateLimitError",
+    "VisionTimeoutError",
     "WorkerContext",
     "WorkerError",
     "__version__",
+    "configure_logging",
+    "current_context",
+    "get_logger",
+    "retry",
+    "run_worker",
 ]

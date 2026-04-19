@@ -18,11 +18,9 @@ import asyncio
 import os
 import sys
 from collections.abc import Sequence
-from typing import Any, Final
-from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
 from worker._version import __version__
-from worker.checkpoints import find_latest_checkpoint
 from worker.exceptions import (
     ConfigurationError,
     PreflightError,
@@ -30,6 +28,9 @@ from worker.exceptions import (
     WorkerError,
 )
 from worker.logging import configure_logging, get_logger, set_run_id
+
+if TYPE_CHECKING:
+    from structlog.stdlib import BoundLogger
 
 _EXIT_OK: Final[int] = 0
 _EXIT_CONFIG_ERROR: Final[int] = 2
@@ -78,11 +79,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Initialise config + preflight only, then exit without driving the bridge.",
     )
-    run.add_argument(
-        "--fresh",
-        action="store_true",
-        help="Ignore existing checkpoints and start a fresh run.",
-    )
 
     # --- doctor ------------------------------------------------------------
     sub.add_parser(
@@ -97,7 +93,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry point. Returns a process exit code."""
+    """CLI entry point.
+
+    Args:
+        argv: Command-line arguments (``sys.argv[1:]`` if ``None``).
+
+    Returns:
+        A process exit code. See module docstring for the meaning of each
+        code.
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -116,12 +120,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "run":
         return _run_worker(args, log)
 
-    parser.error(f"unknown command: {command}")  # raises SystemExit
-    # pragma: no cover — unreachable
-    return _EXIT_CONFIG_ERROR  # type: ignore[unreachable]
+    # argparse's parser.error() raises SystemExit internally but is typed as
+    # returning None; calling sys.exit keeps mypy honest without a type-ignore.
+    parser.error(f"unknown command: {command}")
+    sys.exit(_EXIT_CONFIG_ERROR)  # pragma: no cover — unreachable
 
 
-def _run_worker(args: argparse.Namespace, log: Any) -> int:
+def _run_worker(args: argparse.Namespace, log: BoundLogger) -> int:
     """Wire up the async worker loop and translate exceptions into exit codes."""
     # Imports deferred so `--version` / `doctor` never pay the cost.
     from config import load_config_from_env  # legacy module
@@ -131,21 +136,10 @@ def _run_worker(args: argparse.Namespace, log: Any) -> int:
     if args.run_id:
         os.environ["HEYPIGGY_RUN_ID"] = args.run_id
 
-    if args.fresh:
-        os.environ["HEYPIGGY_FRESH"] = "1"
-        os.environ.pop("HEYPIGGY_RESUME_CHECKPOINT_PATH", None)
-    elif not args.run_id:
-        base_dir = Path(os.environ.get("HEYPIGGY_ARTIFACT_BASE", "/tmp"))
-        latest = find_latest_checkpoint(base_dir)
-        if latest is not None:
-            checkpoint_file, checkpoint = latest
-            os.environ["HEYPIGGY_RUN_ID"] = checkpoint.run_id
-            os.environ["HEYPIGGY_RESUME_CHECKPOINT_PATH"] = str(checkpoint_file)
-
     try:
         cfg = load_config_from_env()
     except Exception as exc:  # pragma: no cover — config loader is resilient
-        log.error(  # type: ignore[attr-defined]
+        log.exception(
             "config_load_failed",
             error=type(exc).__name__,
             error_message=str(exc),
@@ -154,17 +148,8 @@ def _run_worker(args: argparse.Namespace, log: Any) -> int:
 
     set_run_id(cfg.artifacts.run_id)
 
-    if not args.fresh:
-        resume_path = os.environ.get("HEYPIGGY_RESUME_CHECKPOINT_PATH")
-        if resume_path:
-            log.info(  # type: ignore[attr-defined]
-                "worker_resume_requested",
-                run_id=cfg.artifacts.run_id,
-                checkpoint=resume_path,
-            )
-
     with WorkerContext.from_config(cfg) as ctx:
-        log.info(  # type: ignore[attr-defined]
+        log.info(
             "worker_starting",
             version=__version__,
             run_id=cfg.artifacts.run_id,
@@ -173,38 +158,36 @@ def _run_worker(args: argparse.Namespace, log: Any) -> int:
         try:
             asyncio.run(run_worker(ctx, dry_run=args.dry_run))
         except ShutdownRequested as exc:
-            log.info(  # type: ignore[attr-defined]
-                "worker_shutdown_clean", reason=str(exc) or "signal"
-            )
+            log.info("worker_shutdown_clean", reason=str(exc) or "signal")
             return _EXIT_OK
         except ConfigurationError as exc:
-            log.error(  # type: ignore[attr-defined]
+            log.exception(
                 "worker_config_error",
                 error=type(exc).__name__,
                 error_message=str(exc),
             )
             return _EXIT_CONFIG_ERROR
         except PreflightError as exc:
-            log.error(  # type: ignore[attr-defined]
+            log.exception(
                 "worker_preflight_error",
                 error=type(exc).__name__,
                 error_message=str(exc),
             )
             return _EXIT_PREFLIGHT_ERROR
         except WorkerError as exc:
-            log.error(  # type: ignore[attr-defined]
+            log.exception(
                 "worker_error",
                 error=type(exc).__name__,
                 error_message=str(exc),
             )
             return _EXIT_WORKER_ERROR
         except KeyboardInterrupt:
-            log.warning("worker_interrupted")  # type: ignore[attr-defined]
+            log.warning("worker_interrupted")
             return _EXIT_INTERRUPTED
     return _EXIT_OK
 
 
-def _run_doctor(log: Any) -> int:
+def _run_doctor(log: BoundLogger) -> int:
     """Print a sanity report: version, required env vars, optional deps."""
     required_env = ("NVIDIA_API_KEY", "HEYPIGGY_EMAIL", "HEYPIGGY_PASSWORD")
     missing = [name for name in required_env if not os.environ.get(name)]
@@ -230,7 +213,7 @@ def _run_doctor(log: Any) -> int:
         "modules": modules,
     }
 
-    log.info("doctor_report", **report)  # type: ignore[attr-defined]
+    log.info("doctor_report", **report)
 
     # Human-readable summary on stdout too (stderr has the structured log).
     print(f"heypiggy-worker {__version__} on {sys.platform} / Python {sys.version.split()[0]}")

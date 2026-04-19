@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Hardened `worker/` package** — consumed external feedback and tightened typing + docs:
+  - `worker.cli` now has proper `BoundLogger` typing throughout (no more `log: object` +
+    `# type: ignore[attr-defined]` soup) and uses `log.exception(...)` in the
+    top-level except-blocks so stack traces are preserved in structured logs.
+  - `worker.shutdown` replaced two runtime `assert self._loop is not None`
+    invariants with explicit `RuntimeError` checks — assertions get stripped
+    under `python -O`, which would silently corrupt state.
+  - `worker.retry` now guarantees that `asyncio.CancelledError`,
+    `KeyboardInterrupt` and `SystemExit` are **never** retried, even if the
+    caller passes `retry_on=(BaseException,)`. Retrying a cancelled task
+    would deadlock the event loop; retrying a SIGINT would swallow it.
+  - `worker.__init__` exports the full public API (`run_worker`,
+    `RetryPolicy`, `AuditLogger`, `ShutdownController`, every exception
+    class, `configure_logging`, `get_logger`).
+- **LICENSE** and **SECURITY.md** are no longer empty — MIT license text
+  is present, and `SECURITY.md` documents a complete coordinated
+  vulnerability disclosure policy (scope, channels, response targets,
+  hardening baseline).
+- **README.md** quick-start uses the new `heypiggy-worker` CLI, the
+  Python-support badge reflects the real 3.11 / 3.12 / 3.13 support
+  matrix, and a `Development` + `Exit Codes` section was added.
+- **Dockerfile** — OCI image labels added, `PYTHONHASHSEED=random` set in
+  runtime stage, and the brittle `pip install --no-deps || fallback`
+  pattern replaced by a single dependency-resolving install that fails
+  loudly on real errors.
+- **GitHub Actions `ci.yml`** — `bandit` now runs in the lint job, JUnit
+  artefacts are uploaded per matrix entry, and `ruff` emits GitHub
+  annotations.
+- **`.gitignore`** — added `!.pcpm/sessions/**` override so the session
+  summaries ship with the repo (previously the blanket `sessions/` rule
+  matched them).
+
+### Added
+
+- `tests/worker/test_public_api.py` — guards the top-level re-export
+  surface (`__all__` shape, sortedness, semver-shaped version, star-import
+  coverage).
+- Additional `tests/worker/test_retry.py` cases for the new
+  cancellation-safety guarantees (CancelledError, KeyboardInterrupt,
+  SystemExit).
+- Additional `tests/worker/test_shutdown.py` cases for safe restore
+  before `__aenter__` and the programmer-error path when `_install_handlers`
+  runs without an active context.
+
 ### Added
 
 - New `worker/` package with typed, strict-mypy modules:

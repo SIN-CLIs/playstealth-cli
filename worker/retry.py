@@ -10,6 +10,12 @@ Example::
 
     @retry(attempts=3, retry_on=(BridgeTimeoutError,))
     async def call_bridge(...) -> str: ...
+
+Cancellation is handled correctly: :class:`asyncio.CancelledError` and
+:class:`SystemExit` / :class:`KeyboardInterrupt` are **never** retried —
+even if the caller adds :class:`BaseException` to ``retry_on``. Retrying a
+cancelled task would silently deadlock the event loop, so the decorator
+always re-raises these to protect the shutdown path.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, TypeVar, cast
+from typing import Any, Final, TypeVar, cast
 
 from worker.logging import get_logger
 
@@ -27,6 +33,14 @@ _log = get_logger(__name__)
 
 T = TypeVar("T")
 AsyncFn = Callable[..., Awaitable[T]]
+
+#: Exceptions that are always re-raised, regardless of ``retry_on``. Retrying
+#: these would break cooperative cancellation and signal handling.
+_ALWAYS_RERAISE: Final[tuple[type[BaseException], ...]] = (
+    asyncio.CancelledError,
+    KeyboardInterrupt,
+    SystemExit,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +106,9 @@ def retry(
         backoff=backoff,
         jitter=jitter,
     )
+    # Cancellation + top-level signals are never retryable, no matter what
+    # the caller passed in. Prepend them so they always win the race.
+    effective_reraise: tuple[type[BaseException], ...] = _ALWAYS_RERAISE + tuple(reraise_on)
 
     def decorator(fn: AsyncFn[T]) -> AsyncFn[T]:
         @wraps(fn)
@@ -100,7 +117,7 @@ def retry(
             for attempt in range(1, policy.attempts + 1):
                 try:
                     return await fn(*args, **kwargs)
-                except reraise_on:
+                except effective_reraise:
                     raise
                 except retry_on as exc:
                     last_exc = exc

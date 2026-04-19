@@ -21,3 +21,9 @@ Pillow==11.0.0
 # Structured JSON logging with contextvars + secret redaction.
 # Replaces print() everywhere in the worker/ package.
 structlog==24.4.0
+
+# Async HTTP client — benoetigt fuer media_router / audio_handler / video_handler
+# um Audio/Video-Assets von Survey-Seiten parallel herunterzuladen und die
+# NVIDIA NIM Multi-Modal Endpoints (Parakeet ASR, Cosmos-Reason Vision) zu
+# erreichen ohne den Event-Loop zu blockieren.
+aiohttp==3.10.11

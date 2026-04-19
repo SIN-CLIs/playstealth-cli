@@ -74,6 +74,15 @@ class RunSummary:
     exit_reason: str = ""
     surveys_completed: int = 0
 
+    # EUR-Totalizer
+    # WHY: HeyPiggy bestaetigt jede Umfrage mit "+0.XX EUR gutgeschrieben".
+    #      Der Worker soll diese Summen aggregieren damit der User sieht
+    #      wieviel er pro Run verdient. Deduplizierung ueber seen_rewards
+    #      verhindert dass derselbe Banner in mehreren Scans doppelt zaehlt.
+    earnings_eur: float = 0.0
+    seen_rewards: set[str] = field(default_factory=set)
+    surveys_disqualified: int = 0
+
     # Detail-Metriken pro Schritt (optional, kann groß werden)
     step_metrics: list[StepMetric] = field(default_factory=list)
 
@@ -130,6 +139,27 @@ class RunSummary:
     def record_survey_completed(self):
         """Zeichnet einen erfolgreichen Survey-Abschluss auf."""
         self.surveys_completed += 1
+
+    def record_survey_disqualified(self):
+        """Zeichnet einen DQ (Screener-Fail) auf."""
+        self.surveys_disqualified += 1
+
+    def record_earning(self, amount_eur: float, dedup_key: str = "") -> bool:
+        """
+        Addiert amount_eur zur Session-Summe. Returns True wenn neu gebucht,
+        False wenn der dedup_key schon gesehen wurde.
+        WHY: Der Dashboard-Scanner sieht denselben Reward-Banner oft mehrfach
+             (Polling) -> Deduplication verhindert falsche Doppelbuchung.
+        CONSEQUENCES: User sieht den echten Netto-Verdienst pro Run.
+        """
+        if amount_eur <= 0 or amount_eur > 50:
+            return False  # Sanity-Guard: mehr als 50 EUR pro Einzelumfrage ist nie echt
+        key = dedup_key or f"{round(amount_eur, 2)}"
+        if key in self.seen_rewards:
+            return False
+        self.seen_rewards.add(key)
+        self.earnings_eur = round(self.earnings_eur + amount_eur, 2)
+        return True
 
     def finalize(self, exit_reason: str = "", page_state: str = ""):
         """
@@ -196,6 +226,8 @@ class RunSummary:
             "final_page_state": self.final_page_state,
             "exit_reason": self.exit_reason,
             "surveys_completed": self.surveys_completed,
+            "surveys_disqualified": self.surveys_disqualified,
+            "earnings_eur": round(self.earnings_eur, 2),
         }
         if include_steps:
             d["steps"] = [
@@ -239,6 +271,10 @@ class RunSummary:
         print(f"   Vision: {self.total_vision_calls} Calls, ⌀ {self.avg_vision_time:.1f}s")
         print(f"   Bridge: {self.total_bridge_calls} Calls, ⌀ {self.avg_bridge_time:.1f}s")
         print(f"   Surveys abgeschlossen: {self.surveys_completed}")
+        if self.surveys_disqualified:
+            print(f"   Surveys disqualifiziert: {self.surveys_disqualified}")
+        if self.earnings_eur > 0:
+            print(f"   VERDIENT: {self.earnings_eur:.2f} EUR")
         if self.captcha_encounters:
             print(f"   ⚠️ Captchas: {self.captcha_encounters}")
         if self.loop_detections:

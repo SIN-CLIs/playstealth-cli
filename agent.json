@@ -2,14 +2,52 @@
   "name": "A2A-SIN-Worker-heypiggy",
   "slug": "a2a-sin-worker-heypiggy",
   "type": "Worker",
-  "description": "Autonomous HeyPiggy survey worker",
+  "description": "Autonomous HeyPiggy survey worker — multi-modal (audio/video/image), multi-survey queue, fail-replay-learning",
   "team": "Team Worker",
   "teamManager": "A2A-SIN-Team-Worker",
-  "primaryModel": "google/antigravity-gemini-3-flash",
+  "primaryModel": "nvidia/meta/llama-3.2-11b-vision-instruct",
+  "fallbackModels": [
+    "nvidia/microsoft/phi-3.5-vision-instruct",
+    "nvidia/microsoft/phi-3-vision-128k-instruct"
+  ],
+  "auxModels": {
+    "audioAsr": "nvidia/parakeet-tdt-0.6b-v2",
+    "videoUnderstanding": "nvidia/cosmos-reason1-7b"
+  },
   "capabilities": [
     "survey_completion",
-    "autonomous_operation"
+    "autonomous_operation",
+    "multi_survey_queue",
+    "audio_question_handling",
+    "video_question_handling",
+    "image_question_handling",
+    "auto_resume_on_crash",
+    "captcha_handling",
+    "fail_replay_learning",
+    "matrix_grid_handling",
+    "slider_range_handling",
+    "required_field_validation",
+    "infinite_spinner_recovery",
+    "loop_detection_escalation",
+    "native_select_handling",
+    "human_typing_cadence",
+    "eur_totalizer",
+    "session_persistence_cross_run",
+    "panel_specific_overrides",
+    "brain_backed_skip_filter"
   ],
+  "entrypoints": {
+    "cli": "heypiggy-worker run",
+    "doctor": "heypiggy-worker doctor",
+    "legacy": "python heypiggy_vision_worker.py"
+  },
+  "requiredEnv": [
+    "NVIDIA_API_KEY",
+    "HEYPIGGY_EMAIL",
+    "HEYPIGGY_PASSWORD",
+    "BRIDGE_MCP_URL"
+  ],
+  "runbook": "AGENTS.md",
   "marketplace": {
     "pricingModel": "subscription",
     "monthlyPrice": 29.99,

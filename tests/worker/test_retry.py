@@ -144,3 +144,73 @@ class TestRetryDecorator:
             await always_fails()
 
         assert sleeps == [0.5, 1.0]
+
+    async def test_cancelled_error_is_never_retried(self) -> None:
+        """CancelledError must propagate immediately, never be retried."""
+        calls = 0
+
+        @retry(attempts=5, base_delay=0, retry_on=(Exception,))
+        async def cancelled() -> None:
+            nonlocal calls
+            calls += 1
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled()
+        assert calls == 1, "CancelledError must never be retried"
+
+    async def test_cancelled_error_passes_through_even_with_base_exception(self) -> None:
+        """Even retry_on=(BaseException,) must not capture CancelledError."""
+        calls = 0
+
+        @retry(attempts=5, base_delay=0, retry_on=(BaseException,))
+        async def cancelled() -> None:
+            nonlocal calls
+            calls += 1
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled()
+        assert calls == 1
+
+    async def test_keyboard_interrupt_is_never_retried(self) -> None:
+        calls = 0
+
+        @retry(attempts=5, base_delay=0, retry_on=(BaseException,))
+        async def interrupted() -> None:
+            nonlocal calls
+            calls += 1
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            await interrupted()
+        assert calls == 1
+
+    async def test_system_exit_is_never_retried(self) -> None:
+        calls = 0
+
+        @retry(attempts=5, base_delay=0, retry_on=(BaseException,))
+        async def exiting() -> None:
+            nonlocal calls
+            calls += 1
+            raise SystemExit(1)
+
+        with pytest.raises(SystemExit):
+            await exiting()
+        assert calls == 1
+
+    async def test_user_reraise_list_still_wins(self) -> None:
+        """User-supplied reraise_on still works on top of the built-in list."""
+        calls = 0
+
+        class MyFatal(Exception): ...
+
+        @retry(attempts=3, base_delay=0, retry_on=(Exception,), reraise_on=(MyFatal,))
+        async def f() -> None:
+            nonlocal calls
+            calls += 1
+            raise MyFatal("don't retry me")
+
+        with pytest.raises(MyFatal):
+            await f()
+        assert calls == 1

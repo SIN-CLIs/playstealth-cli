@@ -17,9 +17,21 @@ class PageState(Enum):
     UNKNOWN = auto()
     PREFLIGHT = auto()
     LOGIN = auto()
+    ONBOARDING = auto()
     DASHBOARD = auto()
     SURVEY_ACTIVE = auto()
+    # Media-specific survey sub-states — all three roll back to SURVEY_ACTIVE
+    # once the media has been analyzed, but allow the prompt/logic to be aware
+    # that the current question depends on media analysis.
+    SURVEY_AUDIO = auto()
+    SURVEY_VIDEO = auto()
+    SURVEY_IMAGE = auto()
+    MEDIA_LOADING = auto()
     SURVEY_DONE = auto()
+    # Queue-management states
+    QUEUE_COOLDOWN = auto()
+    QUEUE_NAVIGATING = auto()
+    QUEUE_EXHAUSTED = auto()
     CAPTCHA = auto()
     ERROR = auto()
     DONE = auto()

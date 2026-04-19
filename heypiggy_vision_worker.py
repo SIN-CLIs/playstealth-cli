@@ -6,7 +6,11 @@ A2A-SIN-Worker-HeyPiggy — Vision Gate Edition v3.1 (ANTI-RAUSFLUG + CAPTCHA BY
 ================================================================================
 ARCHITEKTUR:
   Bridge Extension (Chrome) ←WebSocket→ HF MCP Server ←HTTP→ Dieser Worker
-  Jede einzelne Aktion wird von Gemini 3 Flash visuell verifiziert.
+  Jede einzelne Aktion wird vom Vision-LLM visuell verifiziert.
+  PRIMARY:   NVIDIA NIM -> meta/llama-3.2-11b-vision-instruct
+  FALLBACK:  NVIDIA NIM -> microsoft/phi-3.5-vision-instruct
+             NVIDIA NIM -> microsoft/phi-3-vision-128k-instruct
+  Backend-Switch: VISION_BACKEND=auto|nvidia (auto nimmt NVIDIA sobald NVIDIA_API_KEY gesetzt).
 
 KERNPRINZIP — EXAKTE TAB-BINDUNG (PRIORITY -7.85):
   Der Worker öffnet genau EINEN Tab (tabs_create) und speichert dessen
@@ -64,23 +68,43 @@ from fail_report import (
 )
 from nvidia_video_analyzer import analyze_fail_multiframe
 from observability import RunSummary
-from worker.bridge_contract import BridgeRequest, call_bridge_with_retry
-from worker.checkpoints import (
-    AgentState,
-    StepContext,
-    archive_run_bundle,
-    checkpoint_path,
-    clear_checkpoint,
-    escalate,
-    fail_safe,
-    find_latest_checkpoint,
-    list_recent_archives,
-    load_checkpoint,
-    save_checkpoint,
-    step_context_advance,
+
+# Multi-Modal Media-Pipeline (Audio / Video / Bilder) + Multi-Survey Queue
+# WHY: Der Worker muss ALLE Umfragetypen abwickeln — auch Audio-Fragen
+# ("Was hören Sie?"), Video-Fragen ("Was zeigt der Clip?") und Multi-Surveys
+# (5+ Umfragen hintereinander ohne manuelles Neustarten).
+from media_router import MediaRouter, MediaAnalysis
+from survey_orchestrator import QueueState, SurveyOrchestrator
+
+# Persona + OpenSIN Global Brain — Wahrheits-Backbone
+# WHY: Der Worker darf NIEMALS lügen oder sich selbst widersprechen. Die Persona
+# liefert die harten Fakten (Alter, Wohnort, Einkommen…), das Answer-Log sorgt
+# dass dieselbe Frage in Validation-Traps immer gleich beantwortet wird, und das
+# Global Brain teilt Erkenntnisse mit anderen Agenten der OpenSIN-Flotte.
+from persona import (
+    AnswerLog,
+    Persona,
+    build_persona_prompt_block,
+    detect_question_topic,
+    load_persona,
+    resolve_answer,
 )
-from worker.sitepack import SitepackLoader
-from worker.exceptions import BridgeUnavailableError
+from global_brain_client import (
+    GlobalBrainClient,
+    PrimeContext,
+    build_brain_prompt_block,
+)
+from panel_overrides import (
+    build_panel_prompt_block,
+    detect_panel,
+)
+from session_store import (
+    dump_session as _session_dump,
+    restore_session as _session_restore,
+)
+from platform_profile import active as _active_platform
+from bridge_retry import call_with_retry as _bridge_call_with_retry
+from budget_guard import BudgetGuard
 
 # Import typed state machine for page state tracking
 from state_machine import page_state_machine
@@ -89,9 +113,9 @@ from state_machine import page_state_machine
 # USER PROFIL — Jeremy Schulze
 # WHY: Der Worker muss Profil-Fragen (Region, Wohnort, Geschlecht, Name etc.)
 #      korrekt mit den echten Daten des Users beantworten.
-#      Das Profil wird in den Vision-Prompt injiziert damit Gemini die richtigen
+#      Das Profil wird in den Vision-Prompt injiziert damit das Vision-LLM die richtigen
 #      Antworten wählt — ohne raten, ohne falsche Klicks.
-# CONSEQUENCES: Ohne Profil würde Gemini zufällig antworten → falsche Daten,
+# CONSEQUENCES: Ohne Profil wuerde das Vision-LLM zufaellig antworten -> falsche Daten,
 #               Umfragen brechen ab, Account könnte gesperrt werden.
 # ============================================================================
 
@@ -128,37 +152,10 @@ def _load_user_profile() -> dict:
 USER_PROFILE = _load_user_profile()
 
 
-def sitepack_selector(name: str) -> str:
-    return SITEPACK_LOADER.get_selector(name)
-
-
-def sitepack_flow(name: str) -> list[str]:
-    return SITEPACK_LOADER.get_flow(name)
-
-
-def sitepack_page_signature(name: str) -> list[str]:
-    return SITEPACK_LOADER.get_page_signature(name)
-
-
-def build_sitepack_context() -> str:
-    login_signature = ", ".join(sitepack_page_signature("login"))
-    dashboard_signature = ", ".join(sitepack_page_signature("dashboard"))
-    survey_signature = ", ".join(sitepack_page_signature("survey_active"))
-    return (
-        "SITEPACK-KONTEXT:\n"
-        f"- login_url: {sitepack_flow('login')[0]}\n"
-        f"- consent_next: {sitepack_selector('consent_next')}\n"
-        f"- survey_card: {sitepack_selector('survey_card')}\n"
-        f"- login_signatures: {login_signature}\n"
-        f"- dashboard_signatures: {dashboard_signature}\n"
-        f"- survey_signatures: {survey_signature}"
-    )
-
-
 def _build_profile_context() -> str:
     """
     Baut einen lesbaren Profil-Kontext-String für den Vision-Prompt.
-    WHY: Gemini muss die genauen Profil-Antworten kennen damit es beim
+    WHY: Das Vision-LLM muss die genauen Profil-Antworten kennen damit es beim
          Ankreuzen von Radio-Buttons (Region, Geschlecht etc.) die richtigen
          Optionen wählt.
     CONSEQUENCES: Leerer String wenn kein Profil vorhanden — Vision fällt auf
@@ -203,9 +200,6 @@ def _build_profile_context() -> str:
 # ============================================================================
 
 WORKER_CONFIG = load_config_from_env()
-SITEPACK_PATH = Path(__file__).resolve().parent / "sitepacks" / "heypiggy" / "v1" / "pack.json"
-SITEPACK_LOADER = SitepackLoader()
-SITEPACK = SITEPACK_LOADER.load(SITEPACK_PATH)
 
 # Bridge-Endpunkte
 BRIDGE_MCP_URL = WORKER_CONFIG.bridge.mcp_url
@@ -245,8 +239,6 @@ ARTIFACT_DIR = WORKER_CONFIG.artifacts.artifact_dir
 SCREENSHOT_DIR = WORKER_CONFIG.artifacts.screenshot_dir
 AUDIT_DIR = WORKER_CONFIG.artifacts.audit_dir
 SESSION_DIR = WORKER_CONFIG.artifacts.session_dir
-ARTIFACT_BASE_DIR = Path(WORKER_CONFIG.artifacts.base_dir)
-CHECKPOINT_PATH = checkpoint_path(ARTIFACT_DIR)
 
 # Erstelle alle Verzeichnisse beim Start
 WORKER_CONFIG.artifacts.ensure_dirs()
@@ -254,19 +246,68 @@ WORKER_CONFIG.artifacts.ensure_dirs()
 CURRENT_RUN_SUMMARY: RunSummary | None = None
 VISION_CIRCUIT_BREAKER = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
 _VISION_CACHE: dict[tuple[str, str], dict[str, object]] = {}
-CURRENT_PAGE_FINGERPRINT = ""
-VISION_VERDICTS = {"PROCEED", "STOP", "RETRY", "ESCALATE"}
-VISION_PAGE_STATES = {
-    "dashboard",
-    "login",
-    "onboarding",
-    "survey",
-    "survey_active",
-    "survey_done",
-    "captcha",
-    "error",
-    "unknown",
-}
+
+# Multi-Modal Media Router + Multi-Survey Orchestrator werden in main() initialisiert.
+# WHY: Globals statt Dependency-Injection, weil dom_prescan() und die Haupt-Loop
+# bereits als freie async Funktionen existieren und ein Refactor auf Injection
+# den gesamten Call-Graph touchen würde.
+# CONSEQUENCES: Die Objekte sind nur innerhalb von main() verfügbar; vor main()
+# sind beide None und der Code fällt defensiv auf den Legacy-Pfad zurück.
+MEDIA_ROUTER: MediaRouter | None = None
+SURVEY_ORCHESTRATOR: SurveyOrchestrator | None = None
+_LAST_MEDIA_ANALYSIS: MediaAnalysis | None = None
+
+# Persona + Brain Globals.
+# ACTIVE_PERSONA wird in main() aus profiles/<username>.json geladen.
+# ANSWER_LOG speichert jede Survey-Antwort damit Validation-Traps nie aus-
+# einanderlaufen. GLOBAL_BRAIN pusht Fakten ins OpenSIN One-Brain (http://...).
+ACTIVE_PERSONA: Persona | None = None
+ANSWER_LOG: AnswerLog | None = None
+GLOBAL_BRAIN: GlobalBrainClient | None = None
+_BRAIN_PRIME_CONTEXT: PrimeContext | None = None
+# Letzte erkannte Frage + Option-Menge (fuer Record-After-Answer Hook)
+_LAST_QUESTION_TEXT: str | None = None
+_LAST_QUESTION_OPTIONS: list[str] = []
+# DQ/Pre-Qual/Complete-Phrase-Detection (fuer Main-Loop + adaptive delay)
+_LAST_SCREENER_HIT: str | None = None
+_LAST_DQ_HIT: str | None = None
+_LAST_COMPLETE_HIT: str | None = None
+# Universelle Hindernis-Detection (Cookie/Translate/Start-CTA/Language/Rating)
+_LAST_OBSTACLE_KIND: str | None = None
+_LAST_RATING_PAGE: dict | None = None
+# Tracking ob die aktuelle Umfrage die Post-Survey-Bewertung bereits gemacht hat
+_RATING_SUBMITTED_FOR_CURRENT: bool = False
+# Same-Question-Loop-Detection: ringbuffer der letzten N gesehenen Fragetexte.
+# WHY: Wenn der Agent auf dieselbe Frage 3x hintereinander antwortet, waehlt
+# Vision vermutlich immer die gleiche falsche Option -> Eskalation noetig.
+_RECENT_QUESTIONS: list[str] = []
+_SAME_QUESTION_STREAK: int = 0
+# Spinner-Loop-Detection: wie oft wurde hintereinander eine Loading-Only-Page gesehen.
+_SPINNER_STREAK: int = 0
+# Matrix/Slider-Detection Payload (letzter Scan)
+_LAST_MATRIX: dict | None = None
+_LAST_SLIDER: dict | None = None
+# Required-Field-Validator: letzter Zaehler an leeren Pflichtfeldern
+# WHY: Vor jedem Weiter/Next-Klick wollen wir im Prompt stehen haben wie
+#      viele Pflichtfelder noch leer sind. Wenn >0 -> Vision darf nicht
+#      weiterklicken, muss erst befuellen.
+_LAST_EMPTY_REQUIRED: int = 0
+# EUR-Totalizer Deduplication: welche Reward-Strings wurden schon gebucht
+_SEEN_REWARD_STRINGS: set[str] = set()
+# Brain-Fail-Learning: welche DQ-Facts wurden pro Run schon geschrieben
+_BRAIN_DQ_WRITTEN: set[str] = set()
+# Answer-Consistency-Memo: {question_hash -> chosen_option_label} innerhalb
+# EINER Umfrage. WHY: Panels stellen bewusst dieselbe Frage 2x (z.B. einmal
+# auf Seite 3 und nochmal auf Seite 11) als Consistency-Check. Wer sich
+# widerspricht wird disqualifiziert — manchmal sogar dauerhaft gesperrt.
+# CONSEQUENCES: Wird beim Survey-Start geleert, nicht beim Worker-Start.
+_ANSWER_MEMO: dict[str, str] = {}
+# Quota-Full-Flag: wird im dom_prescan gesetzt wenn "Quote erreicht" /
+# "survey is full" erkannt wird. WHY: Das ist KEIN DQ — morgen kann die
+# Quote wieder offen sein. Wir duerfen die URL also nicht als "avoid" lernen.
+_QUOTA_FULL_DETECTED: bool = False
+# Siehe CURRENT_RUN_SUMMARY weiter unten — der EUR-Totalizer im dom_prescan
+# liest diesen Zeiger, damit Rewards im globalen run_summary aggregiert werden.
 FAIL_LEARNING_PATH = Path("/tmp/heypiggy_fail_learning.json")
 FAIL_KEYWORD_STOPWORDS = {
     "after",
@@ -1194,6 +1235,25 @@ async def _nvidia_nim_chat(
     choices = payload.get("choices") or []
     message = choices[0].get("message", {}) if choices else {}
     text = message.get("content", "") if isinstance(message, dict) else ""
+    # Budget-Tracking: Token-Usage aus dem OpenAI-kompatiblen NIM-Payload lesen.
+    # WHY: budget_guard muss wissen wieviele Token wir verbrannt haben um die
+    # Kosten-Obergrenze durchzusetzen. Payload hat optional "usage" mit
+    # prompt_tokens / completion_tokens.
+    usage_block = payload.get("usage") or {}
+    in_tok = 0
+    out_tok = 0
+    try:
+        in_tok = int(usage_block.get("prompt_tokens") or 0)
+        out_tok = int(usage_block.get("completion_tokens") or 0)
+    except Exception:
+        in_tok, out_tok = 0, 0
+    guard = globals().get("BUDGET_GUARD")
+    if guard is not None and (in_tok or out_tok):
+        try:
+            guard.record_usage(model=model, input_tokens=in_tok, output_tokens=out_tok)
+        except Exception as ge:
+            # Budget-Tracking darf NIE den Worker crashen
+            audit("budget_record_error", error=str(ge))
     return {
         "ok": True,
         "auth_failure": False,
@@ -1202,6 +1262,8 @@ async def _nvidia_nim_chat(
         "stderr_text": error_text,
         "returncode": status_code,
         "model_used": model,
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
     }
 
 
@@ -1286,7 +1348,7 @@ async def ensure_worker_preflight() -> dict:
 
     probe_path = ensure_vision_probe_screenshot()
     probe_prompt = (
-        'Antworte ausschließlich mit gültigem JSON im Format {"status":"ok"}. Keine Erklärungen.'
+        "Antworte ausschließlich mit gültigem JSON im Format " '{"status":"ok"}. Keine Erklärungen.'
     )
     probe_result = await run_vision_model(
         probe_prompt,
@@ -1371,7 +1433,7 @@ async def wait_for_extension(timeout=600):
     raise RuntimeError(f"Timeout ({timeout}s): Bridge Extension nicht verbunden.")
 
 
-def post_mcp(method: str, params: dict[str, object] | None = None):
+def post_mcp(method: str, params: dict = None):
     """
     Sendet einen MCP-Request an die Bridge mit 3x Retry und Error-Body-Parsing.
     WHY: Die Bridge kann kurzzeitig 500er liefern, das darf nicht zum Crash führen.
@@ -1379,15 +1441,46 @@ def post_mcp(method: str, params: dict[str, object] | None = None):
     """
     global request_id_counter
     request_id_counter += 1
-    request = BridgeRequest(
-        method=method,
-        params=params or {},
-        page_fingerprint=CURRENT_PAGE_FINGERPRINT,
-        timeout_seconds=30,
-        request_id=request_id_counter,
-    )
-    response = call_bridge_with_retry(BRIDGE_MCP_URL, request)
-    return response.result
+
+    body = {"jsonrpc": "2.0", "method": method, "id": request_id_counter}
+    if params:
+        body["params"] = params
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                BRIDGE_MCP_URL,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                decoded = json.loads(resp.read().decode("utf-8"))
+                if "error" in decoded:
+                    last_err = f"MCP Protocol Error: {decoded['error']}"
+                    audit("error", message=last_err, attempt=attempt + 1)
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                return decoded.get("result", {})
+
+        except urllib.error.HTTPError as e:
+            # Echten Error-Body extrahieren statt nur Status-Code
+            try:
+                error_body = e.read().decode("utf-8")
+                error_json = json.loads(error_body)
+                last_err = f"HTTP {e.code}: {json.dumps(error_json)}"
+            except Exception:
+                last_err = f"HTTP {e.code}: {e.reason}"
+            audit("error", message=last_err, attempt=attempt + 1)
+            time.sleep(2 * (attempt + 1))
+
+        except Exception as e:
+            last_err = str(e)
+            audit("error", message=last_err, attempt=attempt + 1)
+            time.sleep(2 * (attempt + 1))
+
+    raise RuntimeError(f"MCP fehlgeschlagen nach 3 Versuchen: {last_err}")
 
 
 def decode_mcp_result(raw):
@@ -1409,7 +1502,7 @@ def normalize_selector(selector: str) -> str:
     Bereinigt einen Vision-Selector in gültiges CSS.
     WHY: Vision-Modelle erzeugen manchmal Playwright-artige Pseudo-Selektoren
     wie :contains(...) oder :has-text(...). Diese sind im Browser-QuerySelector
-    nicht gültig und müssen deshalb vor der Ausführung repariert werden.
+    nicht g��ltig und müssen deshalb vor der Ausführung repariert werden.
     """
     if not selector:
         return selector
@@ -1422,36 +1515,6 @@ def normalize_selector(selector: str) -> str:
     return cleaned
 
 
-def extract_accessibility_ref(value: str) -> str:
-    if not value:
-        return ""
-
-    match = re.search(r"@e\d+", value)
-    if not match:
-        return ""
-    return match.group(0)
-
-
-async def execute_type_text_action(next_params: dict[str, object]) -> None:
-    params = {**next_params, **_tab_params()}
-    selector = str(params.get("selector", ""))
-    explicit_ref = str(params.get("ref", ""))
-    ref = extract_accessibility_ref(explicit_ref or selector)
-
-    if ref:
-        await execute_bridge("click_ref", {"ref": ref, **_tab_params()})
-        await asyncio.sleep(0.5)
-        text = str(params.get("text", ""))
-        if text:
-            await keyboard_action(list(text))
-        return
-
-    normalized_selector = normalize_selector(selector)
-    if normalized_selector:
-        params["selector"] = normalized_selector
-    await execute_bridge("type_text", params)
-
-
 async def click_visible_button_with_text(text_hint: str):
     """
     Klicke einen sichtbaren Button anhand seines Textinhalts.
@@ -1461,11 +1524,10 @@ async def click_visible_button_with_text(text_hint: str):
     """
     global CURRENT_TAB_ID, CURRENT_WINDOW_ID
     tab_params = _tab_params()
-    button_candidates = sitepack_selector("primary_buttons")
     js_code = f"""
     (function() {{
       const hint = {json.dumps(text_hint.lower())};
-      const candidates = Array.from(document.querySelectorAll({json.dumps(button_candidates)}));
+      const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
       const el = candidates.find((node) => {{
         const text = (node.textContent || '').trim().toLowerCase();
         const visible = node.offsetParent !== null;
@@ -1498,25 +1560,33 @@ async def detect_captcha_page() -> bool:
     """Erkennt Captcha-Präsenz via DOM-Scan."""
     global CURRENT_TAB_ID, CURRENT_WINDOW_ID
     tab_params = _tab_params()
-    captcha_presence_selector = sitepack_selector("captcha_presence")
-    captcha_keywords = sitepack_page_signature("captcha")
-    js_code = f"""
-    (function() {{
-        var els = document.querySelectorAll({json.dumps(captcha_presence_selector)});
-        for (var j = 0; j < els.length; j++) {{
-            if (els[j].offsetParent !== null) {{
-                return {{found: true, selector: {json.dumps(captcha_presence_selector)}, index: j}};
-            }}
-        }}
+    js_code = """
+    (function() {
+        var captchaSelectors = [
+            '.recaptcha-checkbox', '.g-recaptcha', '#recaptcha-anchor',
+            'iframe[src*="recaptcha"]', '[title="reCAPTCHA"]',
+            '.h-captcha', 'iframe[src*="hcaptcha"]',
+            '.cf-turnstile', 'iframe[src*="turnstile"]',
+            '.captcha-checkbox', '[class*="captcha"]',
+            '[class*="verify"][class*="human"]'
+        ];
+        for (var i = 0; i < captchaSelectors.length; i++) {
+            var els = document.querySelectorAll(captchaSelectors[i]);
+            for (var j = 0; j < els.length; j++) {
+                if (els[j].offsetParent !== null) {
+                    return {found: true, selector: captchaSelectors[i], index: j};
+                }
+            }
+        }
         var text = (document.body.textContent || '').toLowerCase();
-        var captchaTexts = {json.dumps(captcha_keywords)};
-        for (var i = 0; i < captchaTexts.length; i++) {{
-            if (text.includes(captchaTexts[i])) {{
-                return {{found: true, type: 'text_match', keyword: captchaTexts[i]}};
-            }}
-        }}
-        return {{found: false}};
-    }})();
+        var captchaTexts = ['i am not a robot', 'ich bin kein robot', 'verify you are human', 'security check', 'captcha'];
+        for (var i = 0; i < captchaTexts.length; i++) {
+            if (text.includes(captchaTexts[i])) {
+                return {found: true, type: 'text_match', keyword: captchaTexts[i]};
+            }
+        }
+        return {found: false};
+    })();
     """
     result = await execute_bridge("execute_javascript", {"script": js_code, **tab_params})
     if isinstance(result, dict):
@@ -1535,29 +1605,35 @@ async def handle_captcha() -> bool:
         return False
     _captcha_attempt_count += 1
     tab_params = _tab_params()
-    captcha_checkbox_selector = sitepack_selector("captcha_checkbox_targets")
-    js_code = f"""
-    (function() {{
-        var els = document.querySelectorAll({json.dumps(captcha_checkbox_selector)});
-        for (var j = 0; j < els.length; j++) {{
-            var el = els[j];
-            if (el.offsetParent !== null) {{
-                if (typeof el.click === 'function') el.click();
-                else el.dispatchEvent(new MouseEvent('click', {{bubbles:true,cancelable:true,view:window}}));
-                return {{clicked: true, selector: {json.dumps(captcha_checkbox_selector)}, type: 'checkbox'}};
-            }}
-        }}
-        var refreshBtns = Array.from(document.querySelectorAll({json.dumps(sitepack_selector("primary_buttons"))}));
-        var refresh = refreshBtns.find(function(b) {{
+    js_code = """
+    (function() {
+        var checkboxSelectors = [
+            '.recaptcha-checkbox', '#recaptcha-anchor',
+            '.captcha-checkbox', '[title="reCAPTCHA"]',
+            '[class*="recaptcha"][class*="checkbox"]'
+        ];
+        for (var i = 0; i < checkboxSelectors.length; i++) {
+            var els = document.querySelectorAll(checkboxSelectors[i]);
+            for (var j = 0; j < els.length; j++) {
+                var el = els[j];
+                if (el.offsetParent !== null) {
+                    if (typeof el.click === 'function') el.click();
+                    else el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window}));
+                    return {clicked: true, selector: checkboxSelectors[i], type: 'checkbox'};
+                }
+            }
+        }
+        var refreshBtns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+        var refresh = refreshBtns.find(function(b) {
             var t = (b.textContent || '').toLowerCase();
             return t.includes('refresh') || t.includes('reload') || t.includes('neues') || t.includes('anderes');
-        }});
-        if (refresh) {{
+        });
+        if (refresh) {
             refresh.click();
-            return {{refreshed: true, type: 'refresh'}};
-        }}
-        return {{action: 'none'}};
-    }})();
+            return {refreshed: true, type: 'refresh'};
+        }
+        return {action: 'none'};
+    })();
     """
     result = await execute_bridge("execute_javascript", {"script": js_code, **tab_params})
     audit("captcha", attempt=_captcha_attempt_count, result=str(result)[:200])
@@ -1580,18 +1656,17 @@ async def resolve_survey_selector(selector: str, description: str = "") -> str:
     if not selector:
         return selector
 
-    survey_card_selector = sitepack_selector("survey_card")
     lowered = selector.lower()
-    if survey_card_selector.split(".")[-1] not in lowered and "survey" not in lowered:
+    if "survey-item" not in lowered and "survey" not in lowered:
         return selector
 
     global CURRENT_TAB_ID, CURRENT_WINDOW_ID
     tab_params = _tab_params()
-    js_code = f"""
-    (function() {{
-      const cards = Array.from(document.querySelectorAll({json.dumps(survey_card_selector)})).map((el) => {{
+    js_code = """
+    (function() {
+      const cards = Array.from(document.querySelectorAll('div.survey-item')).map((el) => {
         const r = el.getBoundingClientRect();
-        return {{
+        return {
           id: el.id || '',
           text: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
           visible: el.offsetParent !== null,
@@ -1599,10 +1674,10 @@ async def resolve_survey_selector(selector: str, description: str = "") -> str:
           y: Math.round(r.top + r.height / 2),
           w: Math.round(r.width),
           h: Math.round(r.height),
-        }};
-      }});
+        };
+      });
       return cards.filter((card) => card.visible && card.id);
-    }})();
+    })();
     """
     scan = await execute_bridge("execute_javascript", {"script": js_code, **tab_params})
     cards = []
@@ -1745,17 +1820,66 @@ async def recover_worker_tab_id() -> int | None:
 
 async def execute_bridge(method: str, params: dict[str, object] | None = None):
     """
-    Führt einen Bridge-Tool-Call aus und decodiert das Ergebnis.
-    WHY: Zentraler Wrapper der JEDEN Bridge-Call absichert.
-    CONSEQUENCES: Fängt alle Exceptions und gibt ein Error-Dict zurück statt zu crashen.
+    Fuehrt einen Bridge-Tool-Call aus, decodiert das Ergebnis, und retried
+    bei transienten Fehlern (5xx, connection reset, timeouts) mit
+    exponential backoff.
+
+    WHY: Die MCP-Bridge haengt manchmal 1-3 Sekunden bei Chrome-Extension-
+    Wakeups oder Netzwerk-Hiccups. Einzelner Fehlversuch != Worker-Exit.
+    CONSEQUENCES:
+      - Bis zu 3 Retries mit 0.4s -> 0.9s -> 1.8s Backoff + Jitter
+      - Stale-tabId-Recovery bleibt wie bisher (separater Pfad)
+      - Exceptions + persistente Fehler werden als {"error": ...} zurueckgegeben
+      - bridge_retry.is_transient_bridge_error() entscheidet was "transient" ist
     """
     started_at = time.time()
-    try:
-        call_params = params or {}
+    call_params = params or {}
+
+    # WHY: Methoden die Seiteneffekte erzeugen wie "click_ref" oder "type_text"
+    # sollten NICHT automatisch retried werden — der erste Aufruf koennte
+    # durchgegangen sein und ein zweiter wuerde doppelt klicken/tippen.
+    # Nur reine Lese-/Idempotente Methoden retriesen.
+    idempotent_methods = {
+        "screenshot",
+        "execute_javascript",
+        "get_snapshot",
+        "snapshot",
+        "get_clickable_snapshot",
+        "export_all_cookies",
+        "list_tabs",
+        "get_active_tab",
+        "get_url",
+        "get_page_state",
+    }
+    should_retry = method in idempotent_methods
+
+    async def _one_call() -> object:
         raw = await asyncio.to_thread(
             post_mcp, "tools/call", {"name": method, "arguments": call_params}
         )
-        result = decode_mcp_result(raw)
+        return decode_mcp_result(raw)
+
+    async def _audit_retry(attempt: int, err: str, delay: float) -> None:
+        audit(
+            "bridge_retry",
+            method=method,
+            attempt=attempt,
+            delay=round(delay, 2),
+            error=err[:120],
+        )
+
+    try:
+        if should_retry:
+            result = await _bridge_call_with_retry(
+                _one_call,
+                max_attempts=3,
+                base_delay=0.4,
+                max_delay=2.5,
+                jitter=0.35,
+                on_retry=_audit_retry,
+            )
+        else:
+            result = await _one_call()
 
         # Wenn ein explizit gesetzter tabId-Wert stale ist, niemals blind auf den
         # aktiven Tab ausweichen. Stattdessen nur die exakt bekannte Worker-Tab-
@@ -1783,8 +1907,6 @@ async def execute_bridge(method: str, params: dict[str, object] | None = None):
                     result = decode_mcp_result(retry_raw)
 
         return result
-    except BridgeUnavailableError:
-        raise
     except Exception as e:
         audit("error", message=f"execute_bridge({method}) failed: {e}")
         return {"error": str(e)}
@@ -1888,8 +2010,8 @@ async def take_screenshot(step_num: int, label: str = ""):
 async def dom_prescan():
     """
     Scannt die aktuelle Seite nach klickbaren Elementen und liefert echte Selektoren.
-    WHY: Gemini DARF NIEMALS CSS-Selektoren raten! Es muss die echten kennen.
-    CONSEQUENCES: Ohne Pre-Scan schlägt Gemini Fantasie-Selektoren wie :has-text() vor.
+WHY: Das Vision-LLM DARF NIEMALS CSS-Selektoren raten! Es muss die echten kennen.
+CONSEQUENCES: Ohne Pre-Scan schlaegt das LLM Fantasie-Selektoren wie :has-text() vor.
     """
     global CURRENT_TAB_ID, CURRENT_WINDOW_ID
     tab_params = _tab_params()
@@ -1916,33 +2038,22 @@ async def dom_prescan():
     # 2. Echte HTML-Elemente mit Klick-Potential scannen
     clickable_info = ""
     try:
-        dom_scan_selector = ", ".join(
-            [
-                "[onclick]",
-                sitepack_selector("primary_buttons"),
-                sitepack_selector("survey_card"),
-                sitepack_selector("survey_card_alt"),
-                sitepack_selector("survey_clickable"),
-                "[class*='card']",
-                "[class*='survey']",
-            ]
-        )
-        js_scan = f"""
-        (function() {{
+        js_scan = """
+        (function() {
             var results = [];
-            var all = document.querySelectorAll({json.dumps(dom_scan_selector)});
-            for (var i = 0; i < Math.min(all.length, 25); i++) {{
+            var all = document.querySelectorAll('[onclick], [role="button"], a[href], button, input[type="submit"], [style*="cursor: pointer"], .survey-item, .survey-card, [class*="card"], [class*="survey"]');
+            for (var i = 0; i < Math.min(all.length, 25); i++) {
                 var el = all[i];
                 var r = el.getBoundingClientRect();
                 if (r.width < 5 || r.height < 5) continue;
                 var sel = '';
                 if (el.id) sel = '#' + el.id;
-                else if (el.className && typeof el.className === 'string') {{
-                    var cls = el.className.split(' ').filter(function(c) {{ return c.length > 0; }})[0];
+                else if (el.className && typeof el.className === 'string') {
+                    var cls = el.className.split(' ').filter(function(c) { return c.length > 0; })[0];
                     if (cls) sel = el.tagName.toLowerCase() + '.' + cls;
-                }}
+                }
                 if (!sel) sel = el.tagName.toLowerCase();
-                results.push({{
+                results.push({
                     sel: sel,
                     tag: el.tagName,
                     id: el.id || '',
@@ -1953,10 +2064,10 @@ async def dom_prescan():
                     w: Math.round(r.width),
                     h: Math.round(r.height),
                     cursor: getComputedStyle(el).cursor
-                }});
-            }}
+                });
+            }
             return results;
-        }})();
+        })();
         """
         scan_result = await execute_bridge("execute_javascript", {"script": js_scan, **tab_params})
         if isinstance(scan_result, dict) and "result" in scan_result:
@@ -1990,11 +2101,1714 @@ async def dom_prescan():
     except Exception:
         pass
 
-    return "\n\n".join(filter(None, [page_context, snapshot_info, clickable_info]))
+    # 4. MEDIA-ANALYSE — Audio / Video / Bilder auf der Seite erkennen und verstehen
+    # WHY: Surveys enthalten oft Audio-Clips ("Was hören Sie?") oder Video-Ads
+    # ("Welche Marke wurde gezeigt?") — ohne transkribierten Inhalt kann das Vision-LLM
+    # die Folgefrage nicht beantworten.
+    # CONSEQUENCES: Der Router scannt billig (ein JS-Call) und analysiert nur
+    # wenn Media gefunden wurde. Ergebnisse werden per URL-Hash gecacht damit
+    # wir denselben Clip nicht 20x transkribieren.
+    global _LAST_MEDIA_ANALYSIS
+    media_block = ""
+    if MEDIA_ROUTER is not None and WORKER_CONFIG.media.enabled:
+        try:
+            snapshot = await MEDIA_ROUTER.scan_page()
+            if snapshot.has_media:
+                audit(
+                    "media_detected",
+                    audio=len(snapshot.audio_urls),
+                    video=len(snapshot.video_urls),
+                    images=len(snapshot.image_urls),
+                    embeds=len(snapshot.embed_urls),
+                )
+                # Medien automatisch abspielen (manche Surveys gating "Weiter"
+                # bis der Clip lief)
+                await MEDIA_ROUTER.ensure_media_playing(snapshot)
+                analysis = await MEDIA_ROUTER.analyze(snapshot)
+                _LAST_MEDIA_ANALYSIS = analysis
+                media_block = analysis.to_prompt_block()
+                audit(
+                    "media_analyzed",
+                    elapsed_sec=analysis.elapsed_sec,
+                    audio_ok=sum(1 for a in analysis.audio_transcripts if not a.error),
+                    video_ok=sum(1 for v in analysis.video_understandings if not v.error),
+                    errors=len(analysis.errors),
+                )
+            else:
+                _LAST_MEDIA_ANALYSIS = None
+        except Exception as e:
+            audit("media_prescan_error", error=str(e))
+            _LAST_MEDIA_ANALYSIS = None
+
+    # 5. AKTIVE FRAGE + OPTIONEN EXTRAHIEREN
+    # WHY: Persona.resolve_answer braucht den echten Fragetext und die sichtbaren
+    # Antwort-Optionen um die korrekte Persona-Antwort zu finden. Ohne diese
+    # Extraktion kann der Worker Validation-Traps / Attention-Checks nicht erkennen.
+    # CONSEQUENCES: _LAST_QUESTION_TEXT und _LAST_QUESTION_OPTIONS werden global
+    # gesetzt, damit die Answer-Recording-Logik nach dem Click darauf zugreifen kann.
+    global _LAST_QUESTION_TEXT, _LAST_QUESTION_OPTIONS
+    question_block = ""
+    try:
+        question_js = r"""
+        (function() {
+          // Versuche die sichtbare Frage + Optionen zu finden.
+          // Strategie: groesster sichtbarer Text-Block im oberen Viewport-Drittel,
+          //            gefolgt von Labels/Buttons/Radio-Inputs in Lesereihenfolge.
+          function visible(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 4 || r.height < 4) return false;
+            var s = window.getComputedStyle(el);
+            if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.1) return false;
+            if (r.bottom < 0 || r.top > window.innerHeight + 400) return false;
+            return true;
+          }
+          function txt(el) {
+            return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+          }
+          // FRAGE: suche h1/h2/h3/legend/label/p mit "?" oder Frage-Keywords
+          var q = '';
+          var candidates = Array.from(document.querySelectorAll(
+            'h1, h2, h3, h4, legend, label, .question, [class*="question"], [class*="Frage"], [class*="prompt"], p'
+          ));
+          var bestScore = 0;
+          for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            if (!visible(el)) continue;
+            var t = txt(el);
+            if (t.length < 5 || t.length > 500) continue;
+            var score = 0;
+            if (t.indexOf('?') !== -1) score += 5;
+            if (/\b(bitte|wie|wo|was|wann|warum|welche|which|how|please|select|wählen)\b/i.test(t)) score += 3;
+            if (/\b(alter|geschlecht|einkommen|wohnort|beruf|beschäftigt|haushalt|familienstand|kinder|auto|rauchen|rauchen sie)\b/i.test(t)) score += 2;
+            // bevorzuge oben stehende Fragen
+            var r = el.getBoundingClientRect();
+            if (r.top < window.innerHeight * 0.6) score += 1;
+            if (score > bestScore) { bestScore = score; q = t; }
+          }
+          // OPTIONEN: Radio-Labels, Checkboxen, Buttons, Listenpunkte
+          var opts = [];
+          var seen = {};
+          var optionEls = Array.from(document.querySelectorAll(
+            'label, button:not([type="submit"]), [role="radio"], [role="checkbox"], [role="option"], .option, [class*="option"], [class*="answer"], li'
+          ));
+          for (var j = 0; j < optionEls.length && opts.length < 25; j++) {
+            var oel = optionEls[j];
+            if (!visible(oel)) continue;
+            var ot = txt(oel);
+            if (ot.length < 1 || ot.length > 140) continue;
+            // Filter: vermeide Navigation / grosse Blocks
+            if (/^(weiter|next|submit|fortfahren|zurück|back|continue|abbrechen|cancel|start|beenden)$/i.test(ot)) continue;
+            if (seen[ot.toLowerCase()]) continue;
+            seen[ot.toLowerCase()] = 1;
+            opts.push(ot);
+          }
+          // Extra: Radio-Button VALUES (manche Surveys haben Text ausserhalb des Labels)
+          var radios = Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
+          for (var k = 0; k < radios.length && opts.length < 30; k++) {
+            var rd = radios[k];
+            if (!visible(rd)) continue;
+            var lbl = '';
+            if (rd.id) {
+              var labelEl = document.querySelector('label[for="' + rd.id + '"]');
+              if (labelEl) lbl = txt(labelEl);
+            }
+            if (!lbl && rd.parentElement) lbl = txt(rd.parentElement);
+            if (lbl && lbl.length < 140 && !seen[lbl.toLowerCase()]) {
+              seen[lbl.toLowerCase()] = 1;
+              opts.push(lbl);
+            }
+          }
+          // PROGRESS: "Frage 3 von 10" erkennen
+          var progress = '';
+          var pageText = (document.body.innerText || '').replace(/\s+/g, ' ');
+          var m = pageText.match(/(?:frage|question|q\.?)\s*(\d+)\s*(?:von|of|\/)\s*(\d+)/i);
+          if (m) progress = m[0];
+          return { question: q, options: opts, progress: progress };
+        })();
+        """
+        qres = await execute_bridge("execute_javascript", {"script": question_js, **tab_params})
+        qdata = qres.get("result") if isinstance(qres, dict) else None
+        if isinstance(qdata, dict):
+            q_text = (qdata.get("question") or "").strip()
+            q_opts = qdata.get("options") or []
+            if isinstance(q_opts, list):
+                q_opts = [str(o).strip() for o in q_opts if isinstance(o, (str, int, float)) and str(o).strip()]
+            else:
+                q_opts = []
+            progress = (qdata.get("progress") or "").strip()
+            _LAST_QUESTION_TEXT = q_text or None
+            _LAST_QUESTION_OPTIONS = q_opts
+            if q_text or q_opts:
+                lines = ["ERKANNTE SURVEY-FRAGE (aus DOM):"]
+                if progress:
+                    lines.append(f"- Fortschritt: {progress}")
+                if q_text:
+                    lines.append(f"- Fragetext: {q_text[:300]}")
+                if q_opts:
+                    preview = ", ".join(f'"{o[:60]}"' for o in q_opts[:12])
+                    lines.append(f"- Sichtbare Optionen ({len(q_opts)}): {preview}")
+                question_block = "\n".join(lines)
+                audit(
+                    "question_detected",
+                    question=q_text[:120],
+                    n_options=len(q_opts),
+                    progress=progress,
+                )
+    except Exception as e:
+        audit("question_scan_error", error=str(e))
+        _LAST_QUESTION_TEXT = None
+        _LAST_QUESTION_OPTIONS = []
+
+    # 6. DISQUALIFIKATION / PRE-QUALIFIKATION / ABSCHLUSS-SEITEN ERKENNEN
+    # WHY: Panels zeigen am Anfang Screener ("Wir suchen Personen die...") und
+    # am Ende Disqualifikations-Seiten ("Leider qualifizieren Sie sich nicht").
+    # Beides muss der Agent erkennen:
+    #   - Screener -> extra vorsichtig + wahrheitstreu antworten (niemals luegen!)
+    #   - DQ-Seite -> Survey als DQ markieren, Dashboard ansteuern, naechste Umfrage
+    # CONSEQUENCES: Findet typische Phrasen auf Deutsch + Englisch. Setzt
+    # globale Flags die der Prompt und die Main-Loop auslesen koennen.
+    global _LAST_SCREENER_HIT, _LAST_DQ_HIT, _LAST_COMPLETE_HIT
+    screener_block = ""
+    try:
+        phrase_js = r"""
+        (function() {
+          var body = (document.body && document.body.innerText) ? document.body.innerText : '';
+          body = body.replace(/\s+/g, ' ').trim().toLowerCase();
+          var first = body.substring(0, 4000);
+
+          var SCREENER_PATTERNS = [
+            'wir suchen personen', 'wir suchen teilnehmer', 'bitte beantworten sie die folgenden fragen',
+            'vor der umfrage', 'zur vorqualifikation', 'screening-fragen', 'kurze vorfragen',
+            'damit wir feststellen koennen', 'damit wir feststellen können',
+            'we are looking for people', 'screening questions', 'pre-qualification',
+            'before we begin', 'before the survey', 'to determine if you qualify',
+            'please answer the following'
+          ];
+          var DQ_PATTERNS = [
+            'leider qualifizieren sie sich nicht', 'leider koennen sie nicht teilnehmen',
+            'leider können sie nicht teilnehmen', 'passen sie nicht in die zielgruppe',
+            'sie gehoeren nicht zur zielgruppe', 'sie gehören nicht zur zielgruppe',
+            'diese umfrage ist bereits voll', 'quote erreicht', 'quota full',
+            'sorry, you do not qualify', 'you do not qualify', "you don't qualify",
+            'unfortunately you are not eligible', 'screen out', 'thank you for your interest, but',
+            'umfrage ist geschlossen', 'survey is closed', 'survey has ended',
+            'zu dieser umfrage sind sie nicht berechtigt'
+          ];
+          var COMPLETE_PATTERNS = [
+            'vielen dank fuer ihre teilnahme', 'vielen dank für ihre teilnahme',
+            'umfrage abgeschlossen', 'umfrage erfolgreich', 'ihre antworten wurden gespeichert',
+            'thank you for completing', 'survey complete', 'your responses have been recorded',
+            'sie haben die umfrage erfolgreich', 'ihr guthaben wurde gutgeschrieben',
+            'credited to your account', 'reward has been', 'belohnung wurde'
+          ];
+          function find(arr) {
+            for (var i = 0; i < arr.length; i++) {
+              if (body.indexOf(arr[i]) !== -1) return arr[i];
+            }
+            return null;
+          }
+          // Screener: nur wenn noch keine komplette Seite/DQ
+          var dqHit = find(DQ_PATTERNS);
+          var completeHit = find(COMPLETE_PATTERNS);
+          var screenerHit = (dqHit || completeHit) ? null : find(SCREENER_PATTERNS);
+          return {
+            screener: screenerHit,
+            dq: dqHit,
+            complete: completeHit,
+            body_preview: first.substring(0, 300)
+          };
+        })();
+        """
+        pres = await execute_bridge("execute_javascript", {"script": phrase_js, **tab_params})
+        pdata = pres.get("result") if isinstance(pres, dict) else None
+        if isinstance(pdata, dict):
+            sh = pdata.get("screener")
+            dh = pdata.get("dq")
+            ch = pdata.get("complete")
+            _LAST_SCREENER_HIT = sh if isinstance(sh, str) else None
+            _LAST_DQ_HIT = dh if isinstance(dh, str) else None
+            _LAST_COMPLETE_HIT = ch if isinstance(ch, str) else None
+            if dh:
+                screener_block = (
+                    "===== DISQUALIFIKATION ERKANNT =====\n"
+                    f"Phrase auf Seite: '{dh}'\n"
+                    "REGEL: Diese Umfrage ist verloren (DQ). Setze page_state='survey_done' "
+                    "mit reason='disqualified', damit der Orchestrator die naechste Umfrage "
+                    "startet. Kein Retry, kein Zurueck — akzeptiere und weiter.\n"
+                    "NICHT luegen um zurueckzukommen — das fuehrt zu einer Konto-Sperre."
+                )
+                audit("dq_detected", phrase=dh[:80])
+            elif ch:
+                screener_block = (
+                    "===== UMFRAGE-ABSCHLUSS ERKANNT =====\n"
+                    f"Phrase auf Seite: '{ch}'\n"
+                    "REGEL: Setze page_state='survey_done' mit reason='completed'. "
+                    "Der Orchestrator startet die naechste Umfrage automatisch."
+                )
+                audit("complete_detected", phrase=ch[:80])
+            elif sh:
+                screener_block = (
+                    "===== PRE-QUALIFIKATIONS-SCREENER AKTIV =====\n"
+                    f"Phrase auf Seite: '{sh}'\n"
+                    "REGEL: Jede Frage in dieser Phase entscheidet ueber Zulassung. "
+                    "Antworte STRIKT aus Persona — niemals spekulieren, niemals luegen. "
+                    "Wenn die Persona-Antwort zur Disqualifikation fuehrt, akzeptiere "
+                    "das Schicksal (Luegen fuehren zu Folge-Traps und Account-Sperre)."
+                )
+                audit("screener_detected", phrase=sh[:80])
+    except Exception as e:
+        audit("screener_scan_error", error=str(e))
+        _LAST_SCREENER_HIT = None
+        _LAST_DQ_HIT = None
+        _LAST_COMPLETE_HIT = None
+
+    # 7. UNIVERSELLE HINDERNIS-ERKENNUNG:
+    # COOKIE-BANNER / GOOGLE-TRANSLATE / GENERIC-MODAL / START-CTA /
+    # LANGUAGE-SELECTOR / RATING-PAGE
+    # WHY: Der Agent darf an NICHTS haengen bleiben. Cookie-Banner ("Alle
+    # akzeptieren"), Google-Translate-Popup (X / "Nein danke"), Generic-Modals
+    # ("Umfrage starten"-Raketen-Dialog), Sprachauswahl (muss Persona-Sprache
+    # waehlen) und Post-Survey-Rating-Seiten (5 Sterne + Freitext = Bonus-
+    # Punkte!) sind alle deterministische Hindernisse. Wir bauen sie im JS
+    # direkt und liefern dem Vision-LLM konkrete ref-IDs mit Klick-Priorisierung.
+    # CONSEQUENCES: Der Prompt bekommt einen Block "DRINGENDE AKTION" mit dem
+    # naechsten sicheren Klick — das Vision-LLM nimmt den einfach ab.
+    persona_lang = (
+        ACTIVE_PERSONA.language_primary
+        if ACTIVE_PERSONA is not None and ACTIVE_PERSONA.language_primary
+        else "de"
+    )
+    persona_country_name = (
+        ACTIVE_PERSONA.country_name
+        if ACTIVE_PERSONA is not None and ACTIVE_PERSONA.country_name
+        else ""
+    )
+    obstacle_block = ""
+    global _LAST_RATING_PAGE, _LAST_OBSTACLE_KIND
+    try:
+        obstacle_js = r"""
+        (function(personaLang, personaCountry) {
+          function visible(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2) return false;
+            var s = window.getComputedStyle(el);
+            if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.1) return false;
+            return true;
+          }
+          function txt(el) {
+            if (!el) return '';
+            return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+          }
+          function refOf(el) {
+            return el && el.getAttribute ? (el.getAttribute('data-ref') || el.getAttribute('data-bridge-ref') || '') : '';
+          }
+          function findButtonByText(patterns) {
+            var cands = Array.from(document.querySelectorAll(
+              'button, a[role="button"], [role="button"], input[type="button"], input[type="submit"], a.btn, a.button'
+            ));
+            for (var i = 0; i < cands.length; i++) {
+              var el = cands[i];
+              if (!visible(el)) continue;
+              var t = txt(el).toLowerCase();
+              if (!t || t.length > 60) continue;
+              for (var j = 0; j < patterns.length; j++) {
+                if (t.indexOf(patterns[j]) !== -1) return { el: el, match: patterns[j], text: t };
+              }
+            }
+            return null;
+          }
+          var result = { obstacle: null };
+
+          // A) COOKIE-BANNER
+          var cookieAccept = findButtonByText([
+            'alle akzeptieren', 'alles akzeptieren', 'akzeptieren und weiter',
+            'accept all', 'accept cookies', 'i accept', 'agree to all',
+            'tout accepter', 'aceptar todo'
+          ]);
+          if (cookieAccept) {
+            result.obstacle = { kind: 'cookie_accept', text: cookieAccept.text, ref: refOf(cookieAccept.el) };
+            return result;
+          }
+
+          // B) GOOGLE TRANSLATE POPUP
+          var trPopup = document.querySelector('.goog-te-banner-frame, #goog-gt-tt, iframe[src*="translate.google"]');
+          if (trPopup && visible(trPopup)) {
+            var closeBtn = null;
+            var closers = Array.from(document.querySelectorAll(
+              '[aria-label*="close" i], [aria-label*="schliessen" i], [aria-label*="schließen" i], button.close, .goog-te-banner-frame button'
+            ));
+            for (var k = 0; k < closers.length; k++) { if (visible(closers[k])) { closeBtn = closers[k]; break; } }
+            result.obstacle = {
+              kind: 'translate_popup',
+              text: 'Google Translate banner',
+              ref: refOf(closeBtn) || '',
+              fallback: "document.querySelectorAll('.goog-te-banner-frame,#goog-gt-tt').forEach(function(e){e.remove();});"
+            };
+            return result;
+          }
+
+          // C) START-CTA
+          var startBtn = findButtonByText([
+            'umfrage starten', 'umfrage beginnen', 'jetzt starten', 'los gehts', "los geht's",
+            'start survey', 'begin survey', 'start now', 'get started',
+            'weiter zur umfrage', 'zur umfrage', 'survey starten'
+          ]);
+          if (startBtn) {
+            result.obstacle = { kind: 'start_cta', text: startBtn.text, ref: refOf(startBtn.el) };
+            return result;
+          }
+
+          // D) POST-SURVEY RATING
+          var bodyLow = (document.body.innerText || '').replace(/\s+/g, ' ').toLowerCase();
+          var ratingSignals = [
+            'diese umfrage bewerten', 'umfrage bewerten', 'rate this survey',
+            'bewerten sie die umfrage', 'worum ging es bei der umfrage',
+            'wie hat ihnen die umfrage gefallen', 'how was the survey',
+            'your feedback', 'ihr feedback', 'bewertung abgeben'
+          ];
+          var isRating = false;
+          for (var rs = 0; rs < ratingSignals.length; rs++) {
+            if (bodyLow.indexOf(ratingSignals[rs]) !== -1) { isRating = true; break; }
+          }
+          if (isRating) {
+            var stars = Array.from(document.querySelectorAll(
+              '[class*="star" i], [aria-label*="star" i], [aria-label*="stern" i], [role="radio"][aria-label*="5"], button[data-rating], svg[class*="star" i]'
+            )).filter(visible);
+            var fiveStar = null;
+            for (var s = 0; s < stars.length; s++) {
+              var al = (stars[s].getAttribute('aria-label') || '').toLowerCase();
+              var dv = stars[s].getAttribute('data-rating') || stars[s].getAttribute('data-value') || '';
+              if (al.indexOf('5') !== -1 || dv === '5') { fiveStar = stars[s]; break; }
+            }
+            if (!fiveStar && stars.length >= 5) fiveStar = stars[4];
+            function clickable(el) {
+              var cur = el;
+              for (var d = 0; d < 4 && cur; d++) {
+                if (cur.tagName === 'BUTTON' || cur.getAttribute('role') === 'radio' || cur.tagName === 'A') return cur;
+                cur = cur.parentElement;
+              }
+              return el;
+            }
+            var ta = Array.from(document.querySelectorAll('textarea')).filter(visible)[0] || null;
+            var submit = findButtonByText([
+              'einreichen', 'absenden', 'senden', 'submit', 'send', 'abschicken', 'bewertung abgeben'
+            ]);
+            result.obstacle = {
+              kind: 'rating_page',
+              five_star_ref: fiveStar ? refOf(clickable(fiveStar)) : '',
+              textarea_ref: ta ? refOf(ta) : '',
+              textarea_required: ta ? (ta.hasAttribute('required') || (ta.placeholder || '').toLowerCase().indexOf('erforderlich') !== -1) : false,
+              submit_ref: submit ? refOf(submit.el) : '',
+              submit_text: submit ? submit.text : ''
+            };
+            return result;
+          }
+
+          // E) LANGUAGE-SELECTOR
+          var langHeaderRe = /\b(language|sprache|langue|idioma|lingua|언어|言語|语言)\b/i;
+          var hasLangHeader = langHeaderRe.test(bodyLow.substring(0, 3000));
+          if (hasLangHeader) {
+            var langMap = {
+              'de': ['deutsch', 'german', 'allemand'],
+              'en': ['english', 'englisch', 'anglais'],
+              'fr': ['francais', 'français', 'french', 'franzoesisch'],
+              'es': ['espanol', 'español', 'spanish', 'spanisch'],
+              'it': ['italiano', 'italian', 'italienisch'],
+              'nl': ['nederlands', 'dutch', 'niederlaendisch', 'niederländisch']
+            };
+            var wanted = langMap[personaLang] || langMap['de'];
+            var langCands = Array.from(document.querySelectorAll(
+              'label, input[type="radio"], a, button, [role="radio"], [role="option"], li'
+            )).filter(visible);
+            var pick = null;
+            for (var lc = 0; lc < langCands.length; lc++) {
+              var lt = txt(langCands[lc]).toLowerCase();
+              if (lt.length < 2 || lt.length > 30) continue;
+              for (var w = 0; w < wanted.length; w++) {
+                if (lt === wanted[w] || lt.indexOf(wanted[w]) !== -1) { pick = langCands[lc]; break; }
+              }
+              if (pick) break;
+            }
+            if (pick) {
+              result.obstacle = { kind: 'language_selector', text: txt(pick), ref: refOf(pick), wanted: personaLang };
+              return result;
+            }
+          }
+
+          return result;
+        })(arguments[0], arguments[1]);
+        """
+        ores = await execute_bridge(
+            "execute_javascript",
+            {
+                "script": obstacle_js,
+                "args": [persona_lang, persona_country_name],
+                **tab_params,
+            },
+        )
+        odata = ores.get("result") if isinstance(ores, dict) else None
+        obstacle = odata.get("obstacle") if isinstance(odata, dict) else None
+        if isinstance(obstacle, dict):
+            kind = str(obstacle.get("kind") or "")
+            _LAST_OBSTACLE_KIND = kind or None
+            _LAST_RATING_PAGE = obstacle if kind == "rating_page" else None
+            if kind == "cookie_accept":
+                obstacle_block = (
+                    "===== HINDERNIS: COOKIE-BANNER =====\n"
+                    f"Akzeptier-Button: '{obstacle.get('text', '')}' — ref={obstacle.get('ref') or 'n/a'}\n"
+                    "DRINGENDE AKTION: click_ref auf genau diesen Button. "
+                    "Ohne das bleibt die Seite nicht interaktiv."
+                )
+            elif kind == "translate_popup":
+                obstacle_block = (
+                    "===== HINDERNIS: GOOGLE-TRANSLATE POPUP =====\n"
+                    f"Close-ref={obstacle.get('ref') or 'n/a'}\n"
+                    "DRINGENDE AKTION: Wenn Close-ref vorhanden -> click_ref. "
+                    "Sonst execute_javascript mit diesem Fallback:\n"
+                    f"  {obstacle.get('fallback', '')}"
+                )
+            elif kind == "start_cta":
+                obstacle_block = (
+                    "===== HINDERNIS: START-CTA ('Umfrage starten') =====\n"
+                    f"Button: '{obstacle.get('text', '')}' — ref={obstacle.get('ref') or 'n/a'}\n"
+                    "DRINGENDE AKTION: click_ref auf diesen Button. "
+                    "NIEMALS das X/Schliessen klicken — das bricht die Umfrage ab "
+                    "und du verlierst den Reward."
+                )
+            elif kind == "language_selector":
+                obstacle_block = (
+                    "===== HINDERNIS: SPRACHAUSWAHL =====\n"
+                    f"Persona-Sprache={persona_lang} -> Option '{obstacle.get('text', '')}' "
+                    f"(ref={obstacle.get('ref') or 'n/a'}).\n"
+                    "DRINGENDE AKTION: click_ref auf diese Option, danach Weiter/Next/"
+                    "Continue/Pfeil klicken. NIEMALS eine andere Sprache waehlen — "
+                    "sonst scheiterst du an jeder Folgefrage."
+                )
+            elif kind == "rating_page":
+                fs = obstacle.get("five_star_ref") or "n/a"
+                ta = obstacle.get("textarea_ref") or ""
+                sb = obstacle.get("submit_ref") or "n/a"
+                required = bool(obstacle.get("textarea_required"))
+                obstacle_block = (
+                    "===== BONUS: POST-SURVEY-BEWERTUNG ERKANNT =====\n"
+                    f"5-Stern-ref: {fs} | Textarea-ref: {ta or '(keine)'} | "
+                    f"Submit-ref: {sb} | Text-Pflicht: {required}\n"
+                    "MAXIMALER REWARD-PLAN (schrittweise):\n"
+                    "  1) click_ref auf den 5-Stern (volle Punktzahl -> hoeherer Bonus).\n"
+                    "  2) Falls Textarea sichtbar: type_text mit neutralem Satz, "
+                    "10-20 Woerter, z.B. 'Umfrage war klar formuliert, die Fragen "
+                    "waren verstaendlich und angemessen lang. Alles gut.'\n"
+                    "  3) click_ref auf den Submit-Button.\n"
+                    "NIEMALS das Rating ueberspringen — es ist bares Geld. "
+                    "Erst NACH Submit die Seite als survey_done melden."
+                )
+            else:
+                _LAST_OBSTACLE_KIND = None
+                _LAST_RATING_PAGE = None
+        else:
+            _LAST_OBSTACLE_KIND = None
+            _LAST_RATING_PAGE = None
+        if obstacle_block:
+            audit("obstacle_detected", kind=_LAST_OBSTACLE_KIND or "unknown")
+    except Exception as e:
+        audit("obstacle_scan_error", error=str(e))
+        _LAST_OBSTACLE_KIND = None
+        _LAST_RATING_PAGE = None
+
+    # 8. DASHBOARD-RANKING: Umfragen nach EUR/Minute priorisieren
+    # WHY: HeyPiggy-Dashboard zeigt viele Umfragen-Kacheln. Der Agent soll die
+    # LUKRATIVSTE zuerst klicken — nicht die erstbeste. Reward/Minute +
+    # Sterne-Bewertung sind die Ziel-Metriken. Ohne diese Heuristik verplempert
+    # der Agent Zeit in 0.03 EUR Screenern und ignoriert die 0.76 EUR Karten.
+    # CONSEQUENCES: Nur aktiv auf heypiggy.com /?page=dashboard (kein Rating-
+    # oder Survey-State). Schreibt Top-3 Kacheln mit Ref-IDs in den Prompt.
+    dashboard_block = ""
+    try:
+        current_url = page_context_data.get("url", "") if isinstance(page_context_data, dict) else ""
+    except NameError:
+        current_url = ""
+    # Fallback: url aus page_context-String extrahieren
+    if not current_url and "heypiggy" in (page_context or "").lower():
+        current_url = "heypiggy"
+    is_dashboard = (
+        ("heypiggy.com" in current_url.lower() or "heypiggy" in (page_context or "").lower())
+        and "page=dashboard" in (page_context or "").lower()
+    ) or ("Deine verfügbaren Erhebungen".lower() in (page_context or "").lower())
+    # Rating/Survey/Obstacle-Pages nicht ueberschreiben
+    if is_dashboard and _LAST_OBSTACLE_KIND is None and _LAST_RATING_PAGE is None:
+        try:
+            dashboard_js = r"""
+            (function() {
+              function visible(el) {
+                if (!el) return false;
+                var r = el.getBoundingClientRect();
+                if (r.width < 40 || r.height < 40) return false;
+                var s = window.getComputedStyle(el);
+                if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.1) return false;
+                return r.bottom > 0 && r.top < window.innerHeight + 1200;
+              }
+              function txt(el) {
+                return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+              }
+              function refOf(el) {
+                var cur = el;
+                for (var d = 0; d < 6 && cur; d++) {
+                  var r = cur.getAttribute && (cur.getAttribute('data-ref') || cur.getAttribute('data-bridge-ref'));
+                  if (r) return r;
+                  cur = cur.parentElement;
+                }
+                return '';
+              }
+              // Kandidaten: Karten-artige Container mit Euro + Minuten
+              var all = Array.from(document.querySelectorAll('div, article, li, a, section')).filter(visible);
+              var cards = [];
+              var seen = {};
+              for (var i = 0; i < all.length && cards.length < 40; i++) {
+                var el = all[i];
+                var t = txt(el);
+                if (t.length < 8 || t.length > 400) continue;
+                // Muss sowohl Euro als auch Minuten enthalten
+                var eurMatch = t.match(/(\d+[.,]\d{1,2})\s*(?:€|EUR|eur)/);
+                var minMatch = t.match(/(\d+)\s*(?:min|Min|Minuten)/i);
+                if (!eurMatch || !minMatch) continue;
+                // Vermeide Super-Containers (ganze Liste)
+                if (t.split(eurMatch[0]).length > 2) continue;
+                var key = eurMatch[1] + '|' + minMatch[1] + '|' + t.substring(0, 80);
+                if (seen[key]) continue;
+                seen[key] = 1;
+                var eur = parseFloat(eurMatch[1].replace(',', '.'));
+                var mins = parseInt(minMatch[1], 10) || 1;
+                if (eur <= 0 || mins <= 0 || eur > 20 || mins > 90) continue;
+                // Sterne extrahieren (aria-label="4 stars" oder class enthaelt)
+                var stars = 0;
+                var starNodes = el.querySelectorAll('[aria-label*="star" i], [class*="star" i], [class*="Stern" i]');
+                if (starNodes && starNodes.length) {
+                  // Heuristik: gefuellte Sterne zaehlen
+                  var filled = 0;
+                  for (var sn = 0; sn < starNodes.length; sn++) {
+                    var cls = (starNodes[sn].className || '').toString().toLowerCase();
+                    var al = (starNodes[sn].getAttribute && starNodes[sn].getAttribute('aria-label') || '').toLowerCase();
+                    if (cls.indexOf('full') !== -1 || cls.indexOf('filled') !== -1 || cls.indexOf('active') !== -1) filled++;
+                    var m2 = al.match(/(\d)\s*(?:star|stern)/);
+                    if (m2) stars = Math.max(stars, parseInt(m2[1], 10));
+                  }
+                  if (!stars && filled > 0 && filled <= 5) stars = filled;
+                }
+                var ref = refOf(el);
+                if (!ref) continue;
+                cards.push({
+                  eur: eur,
+                  mins: mins,
+                  eur_per_min: eur / mins,
+                  stars: stars,
+                  ref: ref,
+                  text_preview: t.substring(0, 120)
+                });
+              }
+              // Sortiere: eur_per_min DESC, stars DESC
+              cards.sort(function(a, b) {
+                if (Math.abs(a.eur_per_min - b.eur_per_min) > 0.005) return b.eur_per_min - a.eur_per_min;
+                return b.stars - a.stars;
+              });
+              return { cards: cards.slice(0, 5), total: cards.length };
+            })();
+            """
+            dres = await execute_bridge("execute_javascript", {"script": dashboard_js, **tab_params})
+            ddata = dres.get("result") if isinstance(dres, dict) else None
+            if isinstance(ddata, dict):
+                cards = ddata.get("cards") or []
+                total = int(ddata.get("total") or 0)
+                if cards:
+                    lines = [
+                        "===== DASHBOARD-RANKING: BESTE UMFRAGEN ZUERST =====",
+                        f"Gefunden: {total} Umfragen-Kacheln. Top-Kandidaten (nach EUR/Min, dann Sterne):",
+                    ]
+                    for i, c in enumerate(cards[:5], start=1):
+                        lines.append(
+                            f"  {i}. {c.get('eur', 0):.2f} EUR / {c.get('mins', 0)} Min "
+                            f"= {c.get('eur_per_min', 0):.3f} EUR/Min | "
+                            f"Sterne: {c.get('stars', 0)} | ref={c.get('ref', '')}"
+                        )
+                    best_ref = cards[0].get("ref", "")
+                    lines.append(
+                        "DRINGENDE AKTION: click_ref auf die TOP-1 Karte "
+                        f"(ref={best_ref}). Niemals wahllos eine Karte klicken — "
+                        "immer die lukrativste zuerst. Nach Abschluss kommst du "
+                        "zum Dashboard zurueck und wir bewerten neu."
+                    )
+                    dashboard_block = "\n".join(lines)
+                    audit(
+                        "dashboard_ranked",
+                        total_cards=total,
+                        top_eur=cards[0].get("eur"),
+                        top_mins=cards[0].get("mins"),
+                        top_eur_per_min=round(cards[0].get("eur_per_min", 0), 3),
+                    )
+        except Exception as e:
+            audit("dashboard_scan_error", error=str(e))
+
+    # 9. MEDIA-AUTOPLAY-UNLOCK: Audio/Video auf Survey-Seiten
+    # WHY: Browser blockieren Autoplay — Audio-/Video-Fragen brauchen einen
+    # menschlichen Click auf Play. Erkennen wir ein blockiertes <audio>/<video>
+    # ODER ein Play-Button-Overlay, klicken wir es bevor das Vision-LLM weiterfragt.
+    # CONSEQUENCES: Nur als Hinweis im Prompt. Die eigentliche Click-Entscheidung
+    # trifft das Vision-LLM auf Basis der ref.
+    media_unlock_block = ""
+    try:
+        media_js = r"""
+        (function() {
+          function visible(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 20 || r.height < 20) return false;
+            var s = window.getComputedStyle(el);
+            if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.1) return false;
+            return true;
+          }
+          function refOf(el) {
+            var cur = el;
+            for (var d = 0; d < 4 && cur; d++) {
+              var r = cur.getAttribute && (cur.getAttribute('data-ref') || cur.getAttribute('data-bridge-ref'));
+              if (r) return r;
+              cur = cur.parentElement;
+            }
+            return '';
+          }
+          // Audio / Video Elemente, die paused sind
+          var media = Array.from(document.querySelectorAll('audio, video')).filter(visible);
+          var blocked = null;
+          for (var i = 0; i < media.length; i++) {
+            var m = media[i];
+            if (m.paused === true || m.autoplay === false) {
+              blocked = m; break;
+            }
+          }
+          if (blocked) {
+            // Play-Button in der Naehe suchen
+            var playBtn = null;
+            var near = Array.from(document.querySelectorAll(
+              '[aria-label*="play" i], [aria-label*="abspielen" i], button.play, [class*="play-btn" i], [class*="playBtn" i]'
+            )).filter(visible);
+            if (near.length) playBtn = near[0];
+            return {
+              kind: blocked.tagName.toLowerCase(),
+              ref_media: refOf(blocked),
+              ref_play: playBtn ? refOf(playBtn) : '',
+              duration: blocked.duration || 0,
+              paused: blocked.paused
+            };
+          }
+          return null;
+        })();
+        """
+        mres = await execute_bridge("execute_javascript", {"script": media_js, **tab_params})
+        mdata = mres.get("result") if isinstance(mres, dict) else None
+        if isinstance(mdata, dict) and mdata.get("paused"):
+            kind = mdata.get("kind", "audio")
+            ref_media = mdata.get("ref_media") or ""
+            ref_play = mdata.get("ref_play") or ""
+            dur = mdata.get("duration") or 0
+            media_unlock_block = (
+                f"===== MEDIA BLOCKIERT ({kind.upper()}) =====\n"
+                f"paused=true | duration={dur:.1f}s | "
+                f"media_ref={ref_media or '(n/a)'} | play_ref={ref_play or '(n/a)'}\n"
+                "DRINGENDE AKTION: click_ref auf den Play-Button (ref_play bevorzugt, "
+                f"sonst ref_media). Wenn beide fehlen, execute_javascript: "
+                f"  document.querySelectorAll('{kind}').forEach(e=>e.play().catch(()=>{{}}));\n"
+                "WARTE die volle Spielzeit ab bevor du die Frage beantwortest — "
+                "Panels loggen wenn eine Audio/Video-Frage schneller als die Medienlaenge "
+                "beantwortet wird und disqualifizieren stumm."
+            )
+            audit("media_blocked", kind=kind, duration=round(dur, 1))
+    except Exception as e:
+        audit("media_unlock_error", error=str(e))
+
+    # 10. MATRIX / GRID / LIKERT-TABELLEN
+    # WHY: Professionelle Panels (Sapio, Dynata, Cint) nutzen Raster-Fragen:
+    # "Bewerten Sie diese Aussagen von 'Stimme gar nicht zu' bis 'Stimme voll zu'"
+    # mit 5-15 Zeilen und 5-7 Spalten. Pro Zeile EIN Radio/Click. Wenn das LLM
+    # nur eine Zelle klickt und die anderen vergisst, bleibt die Seite und
+    # die "Weiter"-Schaltflaeche bleibt disabled -> Stillstand.
+    # CONSEQUENCES: Wir extrahieren die Aussagen pro Zeile und geben Vision
+    # einen kompletten Zeilen-Plan mit Standardwert "neutral/mitte" als Default.
+    matrix_block = ""
+    global _LAST_MATRIX
+    try:
+        matrix_js = r"""
+        (function() {
+          function visible(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 4 || r.height < 4) return false;
+            var s = window.getComputedStyle(el);
+            if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.1) return false;
+            return true;
+          }
+          function txt(el) { return el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : ''; }
+          function refOf(el) {
+            var cur = el;
+            for (var d = 0; d < 4 && cur; d++) {
+              var r = cur.getAttribute && (cur.getAttribute('data-ref') || cur.getAttribute('data-bridge-ref'));
+              if (r) return r;
+              cur = cur.parentElement;
+            }
+            return '';
+          }
+          // Matrix = Tabelle ODER Container mit mindestens 2 Zeilen mit gleicher Radio-Spalten-Anzahl
+          var tables = Array.from(document.querySelectorAll('table, [role="grid"], [role="table"], [class*="matrix" i], [class*="grid" i]')).filter(visible);
+          // Fallback: alle divs mit >=2 children die jeweils 3+ radios haben
+          var candidates = tables.slice();
+          if (!candidates.length) {
+            var divs = Array.from(document.querySelectorAll('form, div, section')).filter(function(el) {
+              if (!visible(el)) return false;
+              var rows = el.querySelectorAll(':scope > *');
+              if (rows.length < 2) return false;
+              var counts = [];
+              for (var i = 0; i < rows.length && counts.length < 6; i++) {
+                var rc = rows[i].querySelectorAll('input[type="radio"], [role="radio"]').length;
+                if (rc >= 3) counts.push(rc);
+              }
+              if (counts.length < 2) return false;
+              // Alle Counts gleich?
+              return counts.every(function(c) { return c === counts[0]; });
+            });
+            candidates = divs;
+          }
+          if (!candidates.length) return null;
+          // Nimm groesste Matrix
+          candidates.sort(function(a,b){
+            var ra=a.getBoundingClientRect(); var rb=b.getBoundingClientRect();
+            return (rb.width*rb.height)-(ra.width*ra.height);
+          });
+          var m = candidates[0];
+          // Header-Labels (Spalten-Skala)
+          var headers = [];
+          var ths = m.querySelectorAll('th, thead td, [role="columnheader"]');
+          ths.forEach(function(th) {
+            if (visible(th)) {
+              var t = txt(th);
+              if (t && t.length < 60) headers.push(t);
+            }
+          });
+          // Zeilen-Aussagen + Radio-Refs
+          var rows = [];
+          var rowEls = m.querySelectorAll('tr, [role="row"]');
+          if (!rowEls.length) {
+            rowEls = m.querySelectorAll(':scope > *');
+          }
+          rowEls.forEach(function(r) {
+            if (!visible(r)) return;
+            var radios = r.querySelectorAll('input[type="radio"], [role="radio"]');
+            if (radios.length < 3) return;
+            // Aussage: erste Zelle oder erstes Label
+            var statement = '';
+            var firstLabel = r.querySelector('th, td:first-child, [role="rowheader"], label');
+            if (firstLabel) statement = txt(firstLabel);
+            if (!statement) statement = txt(r).substring(0, 120);
+            if (!statement) return;
+            var radioRefs = [];
+            radios.forEach(function(rd) {
+              if (!visible(rd)) return;
+              var label = '';
+              if (rd.id) {
+                var lbl = document.querySelector('label[for="'+rd.id+'"]');
+                if (lbl) label = txt(lbl);
+              }
+              radioRefs.push({ ref: refOf(rd), label: label || (rd.value || '') });
+            });
+            if (radioRefs.length >= 3) {
+              rows.push({ statement: statement.substring(0, 160), radios: radioRefs });
+            }
+          });
+          if (rows.length < 2) return null;
+          return {
+            headers: headers.slice(0, 10),
+            rows: rows.slice(0, 20),
+            cols: (rows[0] && rows[0].radios) ? rows[0].radios.length : 0
+          };
+        })();
+        """
+        mxres = await execute_bridge("execute_javascript", {"script": matrix_js, **tab_params})
+        mxdata = mxres.get("result") if isinstance(mxres, dict) else None
+        if isinstance(mxdata, dict) and mxdata.get("rows"):
+            _LAST_MATRIX = mxdata
+            rows = mxdata.get("rows") or []
+            headers = mxdata.get("headers") or []
+            cols = int(mxdata.get("cols") or 0)
+            # Neutralste Spalte = Mitte (fuer ungerade Skalen), sonst Mitte-links
+            # ANTI-STRAIGHT-LINING: Dynata/Sapio/Cint flaggen Antworten bei
+            # denen jede Matrix-Zeile in derselben Spalte geklickt wird als
+            # "Speeder" bzw. "Straight-liner" — das fuehrt zu Score-Abwertung
+            # oder sofortigem DQ. Wir variieren deshalb 25-30% der Zeilen um
+            # +/-1 Spalte (deterministisch per stmt-Hash damit Re-Scans stabil
+            # bleiben und die Consistency-Memo nicht triggert).
+            neutral_idx = (cols // 2) if cols else 0
+            lines = [
+                "===== MATRIX / GRID-FRAGE ERKANNT =====",
+                f"Spalten ({cols}): {', '.join(headers) if headers else '(keine Header)'}",
+                f"Zeilen ({len(rows)}):",
+            ]
+            jittered_count = 0
+            for r in rows[:15]:
+                stmt = r.get("statement", "")
+                radios = r.get("radios", [])
+                if not radios:
+                    continue
+                # Deterministischer Jitter: hash(stmt) mod 10 < 3 -> jittern
+                h = int(hashlib.md5(stmt.encode("utf-8")).hexdigest()[:4], 16)
+                jitter = 0
+                if cols >= 4 and (h % 10) < 3:
+                    # +1 oder -1 abhaengig vom Hash
+                    jitter = 1 if (h % 2 == 0) else -1
+                target_idx = max(0, min(len(radios) - 1, neutral_idx + jitter))
+                target = radios[target_idx]
+                tag = "jitter" if jitter else "neutral"
+                if jitter:
+                    jittered_count += 1
+                lines.append(
+                    f"  - '{stmt[:90]}' -> ref={target.get('ref','')} "
+                    f"({target.get('label','')}) [{tag}]"
+                )
+            lines.append(
+                "REGEL: Klicke FUER JEDE ZEILE genau ein Radio — "
+                "bevorzugt die Persona-plausible Position, sonst oben vorgeschlagene. "
+                "ANTI-SPEEDER: Nicht alle Zeilen in derselben Spalte — die [jitter]-"
+                "markierten Zeilen bewusst eine Spalte daneben. "
+                "NIEMALS 'Weiter' klicken bevor alle Zeilen befuellt sind — sonst "
+                "bleibt die Matrix unvollstaendig und die Umfrage sperrt Fortschritt. "
+                "Arbeite die Liste von oben nach unten ab, eine Zeile pro Schritt."
+            )
+            matrix_block = "\n".join(lines)
+            audit("matrix_detected", rows=len(rows), cols=cols)
+        else:
+            _LAST_MATRIX = None
+    except Exception as e:
+        audit("matrix_scan_error", error=str(e))
+        _LAST_MATRIX = None
+
+    # 11. SLIDER / RANGE-FRAGEN
+    # WHY: <input type="range"> kann per normalem click_ref nicht auf den
+    # gewuenschten Wert gesetzt werden. Wir geben Vision den JS-Befehl vor.
+    # CONSEQUENCES: Persona-gesteuerter Default: "mitte-rechts" (neutral-positiv).
+    slider_block = ""
+    global _LAST_SLIDER
+    try:
+        slider_js = r"""
+        (function() {
+          var sliders = Array.from(document.querySelectorAll('input[type="range"], [role="slider"]')).filter(function(el) {
+            var r = el.getBoundingClientRect();
+            return r.width > 10 && r.height > 3;
+          });
+          if (!sliders.length) return null;
+          return sliders.slice(0, 3).map(function(s) {
+            var ref = s.getAttribute('data-ref') || s.getAttribute('data-bridge-ref') || '';
+            var p = s.parentElement;
+            for (var d = 0; d < 3 && !ref && p; d++) {
+              ref = p.getAttribute && (p.getAttribute('data-ref') || p.getAttribute('data-bridge-ref')) || '';
+              p = p.parentElement;
+            }
+            var sel = '';
+            if (s.id) sel = '#' + s.id;
+            else if (s.name) sel = (s.tagName.toLowerCase()) + '[name="'+s.name+'"]';
+            return {
+              ref: ref,
+              selector: sel,
+              min: parseFloat(s.min || s.getAttribute('aria-valuemin') || '0'),
+              max: parseFloat(s.max || s.getAttribute('aria-valuemax') || '100'),
+              step: parseFloat(s.step || '1'),
+              value: parseFloat(s.value || s.getAttribute('aria-valuenow') || '0')
+            };
+          });
+        })();
+        """
+        sres = await execute_bridge("execute_javascript", {"script": slider_js, **tab_params})
+        sdata = sres.get("result") if isinstance(sres, dict) else None
+        if isinstance(sdata, list) and sdata:
+            _LAST_SLIDER = {"sliders": sdata}
+            lines = ["===== SLIDER / RANGE-FRAGE ERKANNT ====="]
+            for i, sl in enumerate(sdata, start=1):
+                mn = sl.get("min", 0)
+                mx = sl.get("max", 100)
+                # Neutral-positiver Default: 65% des Ranges
+                target = mn + (mx - mn) * 0.65
+                step = sl.get("step", 1) or 1
+                target = round(target / step) * step
+                selector = sl.get("selector") or ""
+                lines.append(
+                    f"  Slider {i}: min={mn} max={mx} aktuell={sl.get('value')} "
+                    f"-> Persona-Ziel={target}"
+                )
+                if selector:
+                    lines.append(
+                        f"    JS: var el=document.querySelector('{selector}'); "
+                        f"el.value={target}; el.dispatchEvent(new Event('input',{{bubbles:true}})); "
+                        f"el.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                    )
+            lines.append(
+                "REGEL: Nutze execute_javascript um den Slider auf den Zielwert "
+                "zu setzen (click_ref funktioniert bei Range-Inputs NICHT). "
+                "Loese danach 'input' UND 'change' aus, sonst erkennt die Umfrage "
+                "keinen neuen Wert."
+            )
+            slider_block = "\n".join(lines)
+            audit("slider_detected", count=len(sdata))
+        else:
+            _LAST_SLIDER = None
+    except Exception as e:
+        audit("slider_scan_error", error=str(e))
+        _LAST_SLIDER = None
+
+    # 12. INFINITE-SPINNER DETECTION
+    # WHY: Manche Screener (siehe PureSpectrum-Screenshot) zeigen minutenlang
+    # nur einen Ladekreis ohne interaktive Elemente. Der Agent wartet sonst
+    # ewig bis zum no_progress-Limit und bricht die ganze Session ab. Besser:
+    # nach 3 aufeinanderfolgenden Leer-Seiten aktiv refreshen.
+    # CONSEQUENCES: _SPINNER_STREAK wird inkrementiert; bei >=3 empfehlen wir
+    # im Prompt einen navigate zur aktuellen URL (harter Reload).
+    spinner_block = ""
+    global _SPINNER_STREAK
+    try:
+        spinner_js = r"""
+        (function() {
+          var vis = function(el){ if(!el) return false; var r=el.getBoundingClientRect(); if(r.width<2||r.height<2) return false; var s=window.getComputedStyle(el); return s.display!=='none'&&s.visibility!=='hidden'&&parseFloat(s.opacity)>=0.1; };
+          var hasSpinner = !!document.querySelector(
+            '[class*="spinner" i], [class*="loader" i], [class*="loading" i], [role="progressbar"], .MuiCircularProgress-root, svg[class*="spin" i]'
+          );
+          var spinnerVisible = false;
+          if (hasSpinner) {
+            var spinners = document.querySelectorAll('[class*="spinner" i], [class*="loader" i], [class*="loading" i], [role="progressbar"], .MuiCircularProgress-root, svg[class*="spin" i]');
+            for (var i = 0; i < spinners.length; i++) { if (vis(spinners[i])) { spinnerVisible = true; break; } }
+          }
+          // Interaktive Elemente zaehlen
+          var interactive = Array.from(document.querySelectorAll(
+            'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="radio"], [role="checkbox"], [role="link"]'
+          )).filter(vis);
+          // Cookie-Banner-Buttons zaehlen wir NICHT — die sollen separat behandelt werden.
+          var realInteractive = interactive.filter(function(el) {
+            var t = (el.innerText||el.textContent||'').toLowerCase();
+            return t.indexOf('akzeptieren') === -1 && t.indexOf('accept') === -1 && t.indexOf('ablehnen') === -1;
+          });
+          var bodyTextLen = (document.body.innerText || '').replace(/\s+/g,' ').trim().length;
+          return {
+            spinnerVisible: spinnerVisible,
+            interactiveCount: realInteractive.length,
+            bodyTextLen: bodyTextLen
+          };
+        })();
+        """
+        spres = await execute_bridge("execute_javascript", {"script": spinner_js, **tab_params})
+        spdata = spres.get("result") if isinstance(spres, dict) else None
+        loading_only = False
+        if isinstance(spdata, dict):
+            loading_only = (
+                bool(spdata.get("spinnerVisible"))
+                and int(spdata.get("interactiveCount", 0)) == 0
+                and int(spdata.get("bodyTextLen", 0)) < 200
+            )
+        if loading_only:
+            _SPINNER_STREAK += 1
+            if _SPINNER_STREAK >= 3:
+                spinner_block = (
+                    "===== HINDERNIS: INFINITE SPINNER =====\n"
+                    f"Seit {_SPINNER_STREAK} Schritten nur Spinner + keine interaktiven "
+                    "Elemente. Die Seite haengt.\n"
+                    "DRINGENDE AKTION: execute_javascript mit "
+                    "'location.reload()' ODER navigate zur aktuellen URL. "
+                    "Nach Reload wartet human_delay bis DOM geladen ist. "
+                    "Nicht ewig darauf warten dass etwas von selbst erscheint."
+                )
+                audit("spinner_loop", streak=_SPINNER_STREAK)
+        else:
+            _SPINNER_STREAK = 0
+    except Exception as e:
+        audit("spinner_scan_error", error=str(e))
+
+    # 13. SAME-QUESTION-LOOP DETECTION (Update)
+    # WHY: Wenn _LAST_QUESTION_TEXT in den letzten 3 Scans identisch war,
+    # waehlt Vision wiederholt die falsche Option -> wir muessen Eskalation
+    # einleiten: alternative Option probieren oder zurueck/refresh.
+    # CONSEQUENCES: Ein Block im Prompt der Vision zwingt die ZWEIT- oder
+    # DRITTBESTE Option zu klicken bzw. bei 4+ Retries navigate back zu probieren.
+    loop_block = ""
+    global _RECENT_QUESTIONS, _SAME_QUESTION_STREAK
+    try:
+        if _LAST_QUESTION_TEXT:
+            _RECENT_QUESTIONS.append(_LAST_QUESTION_TEXT)
+            if len(_RECENT_QUESTIONS) > 6:
+                _RECENT_QUESTIONS = _RECENT_QUESTIONS[-6:]
+            # Streak = wie oft hintereinander dieselbe Frage
+            streak = 1
+            for i in range(len(_RECENT_QUESTIONS) - 2, -1, -1):
+                if _RECENT_QUESTIONS[i] == _LAST_QUESTION_TEXT:
+                    streak += 1
+                else:
+                    break
+            _SAME_QUESTION_STREAK = streak
+            if streak >= 3:
+                esc_instructions = [
+                    "DRINGENDE ESKALATION: Die Seite bleibt auf derselben Frage.",
+                    f"Streak: {streak} Wiederholungen.",
+                ]
+                if streak == 3:
+                    esc_instructions.append(
+                        "AKTION: Probiere eine ANDERE (zweitbeste) Option als beim "
+                        "letzten Versuch. Vermutlich ist ein Validierungs-Constraint "
+                        "verletzt (z.B. alle Zeilen einer Matrix nicht ausgefuellt, "
+                        "Checkbox 'Keine' darf nicht zusammen mit anderen)."
+                    )
+                elif streak == 4:
+                    esc_instructions.append(
+                        "AKTION: Suche nach einer 'Weiter'/'Next'/'Continue'/'Submit' "
+                        "Schaltflaeche und klicke sie. Vielleicht hat die Antwort "
+                        "geklappt, aber es fehlt der Submit."
+                    )
+                elif streak >= 5:
+                    esc_instructions.append(
+                        "AKTION: execute_javascript 'location.reload()' ODER "
+                        "navigate mit url=window.location.href. Wir sind definitiv "
+                        "haengen geblieben."
+                    )
+                loop_block = "===== SAME-QUESTION-LOOP =====\n" + "\n".join(esc_instructions)
+                audit("same_question_loop", streak=streak)
+    except Exception as e:
+        audit("loop_scan_error", error=str(e))
+
+    # ============================================================
+    # MEGA-SCAN (Tail-Block 14+15+16+19 in einem Roundtrip)
+    # ============================================================
+    # WHY: Die Scanner 14 (required fields), 15 (reward totalizer), 16
+    # (panel URL+body text) und 19 (error banner) laufen am Ende von
+    # dom_prescan und sind alle reine Lesezugriffe aufs DOM. Frueher
+    # waren das 4 separate Bridge-Calls = 4 Roundtrips ueber MCP.
+    # Jetzt buendeln wir sie in EINEN JS-Call und sparen damit 3
+    # Roundtrips pro Step (~300-400ms bei typischer MCP-Latenz).
+    # CONSEQUENCES: Bei 50 Steps pro Umfrage = 15-20s Ersparnis pro
+    # Survey, 15-20min pro 50-Survey-Tag. Die einzelnen Blocks sind
+    # trotzdem noch robust: bei JS-Fehler wird _mega=None gesetzt und
+    # die Blocks fallen still auf "kein Output" zurueck — genau wie
+    # frueher bei Einzelfehlern.
+    _mega: dict | None = None
+    try:
+        mega_js = r"""
+        (function() {
+          function visible(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2) return false;
+            var s = window.getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) >= 0.1;
+          }
+          function visibleStrict(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 4 || r.height < 4) return false;
+            var s = window.getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity) >= 0.3;
+          }
+          function refOf(el) {
+            var cur = el;
+            for (var d = 0; d < 4 && cur; d++) {
+              var r = cur.getAttribute && (cur.getAttribute('data-ref') || cur.getAttribute('data-bridge-ref'));
+              if (r) return r;
+              cur = cur.parentElement;
+            }
+            return '';
+          }
+          function labelOf(el) {
+            if (el.id) {
+              var lbl = document.querySelector('label[for="'+el.id+'"]');
+              if (lbl) return (lbl.innerText||lbl.textContent||'').replace(/\s+/g,' ').trim().substring(0,80);
+            }
+            var p = el.closest('label');
+            if (p) return (p.innerText||p.textContent||'').replace(/\s+/g,' ').trim().substring(0,80);
+            var aria = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || '';
+            return (aria||'').substring(0,80);
+          }
+
+          var bodyText = (document.body && document.body.innerText || '').replace(/\s+/g, ' ');
+          var bodyTextShort = bodyText.substring(0, 3000);
+
+          // --- Required-Field-Validator (frueher Scanner 14) ---
+          var reqAll = Array.from(document.querySelectorAll(
+            'input[required], select[required], textarea[required], '+
+            '[aria-required="true"], [data-required="true"], [data-required="required"]'
+          )).filter(visible);
+          var empties = [];
+          for (var i = 0; i < reqAll.length && empties.length < 15; i++) {
+            var el = reqAll[i];
+            var tag = el.tagName.toLowerCase();
+            var type = (el.type||'').toLowerCase();
+            var empty = false;
+            if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+              if (!el.name) continue;
+              var grp = document.getElementsByName(el.name);
+              var anyChecked = false;
+              for (var g = 0; g < grp.length; g++) { if (grp[g].checked) { anyChecked = true; break; } }
+              if (!anyChecked) empty = true;
+              if (empty && empties.some(function(e){ return e.group === el.name; })) continue;
+            } else if (tag === 'select') {
+              empty = !el.value || el.value === '' || el.selectedIndex === 0;
+            } else {
+              empty = !el.value || el.value.trim() === '';
+            }
+            if (empty) {
+              empties.push({ ref: refOf(el), tag: tag, type: type, label: labelOf(el), group: el.name || '' });
+            }
+          }
+          var submits = Array.from(document.querySelectorAll(
+            'button[type="submit"], input[type="submit"], button, [role="button"]'
+          )).filter(function(b) {
+            if (!visible(b)) return false;
+            var t = (b.innerText||b.textContent||b.value||'').toLowerCase();
+            return /weiter|next|continue|submit|absenden|fortfahren|weiterleiten|fertig/.test(t);
+          });
+
+          // --- EUR-Totalizer (frueher Scanner 15) ---
+          var rewardPatterns = [
+            /(?:gutgeschrieben|erhalten|credit|earned|\+)\s*(\d+[.,]\d{1,2})\s*(?:EUR|€|eur)/gi,
+            /(\d+[.,]\d{1,2})\s*(?:EUR|€|eur)\s*(?:gutgeschrieben|erhalten|credit|earned)/gi
+          ];
+          var rewards = [];
+          for (var p = 0; p < rewardPatterns.length; p++) {
+            var m;
+            while ((m = rewardPatterns[p].exec(bodyText)) !== null) {
+              var v = parseFloat(m[1].replace(',', '.'));
+              if (v > 0 && v < 50) {
+                var idx = m.index;
+                var ctx = bodyText.substring(Math.max(0, idx - 20), Math.min(bodyText.length, idx + m[0].length + 20));
+                rewards.push({ amount: v, context: ctx.substring(0, 80) });
+                if (rewards.length >= 5) break;
+              }
+            }
+            if (rewards.length >= 5) break;
+          }
+
+          // --- Error-Banner (frueher Scanner 19) ---
+          var errNodes = Array.from(document.querySelectorAll(
+            '[role="alert"], [class*="error" i], [class*="invalid" i], [class*="warning" i], '+
+            '[class*="required" i], .text-danger, .text-red-500, .text-red-600, .alert, .error-message, .validation-summary'
+          )).filter(visibleStrict);
+          var errHits = [];
+          for (var i2 = 0; i2 < errNodes.length && errHits.length < 5; i2++) {
+            var t2 = (errNodes[i2].innerText || errNodes[i2].textContent || '').replace(/\s+/g,' ').trim();
+            if (!t2 || t2.length < 4 || t2.length > 240) continue;
+            var lo = t2.toLowerCase();
+            if (lo.indexOf('bitte') !== -1 || lo.indexOf('please') !== -1 ||
+                lo.indexOf('required') !== -1 || lo.indexOf('pflicht') !== -1 ||
+                lo.indexOf('beantworten') !== -1 || lo.indexOf('answer') !== -1 ||
+                lo.indexOf('fehler') !== -1 || lo.indexOf('error') !== -1 ||
+                lo.indexOf('invalid') !== -1 || lo.indexOf('ungueltig') !== -1 || lo.indexOf('ungültig') !== -1) {
+              errHits.push(t2.substring(0, 180));
+            }
+          }
+
+          return {
+            required: { empty: empties, submitInView: submits.length > 0 },
+            reward: rewards,
+            panel: { url: window.location.href, text: bodyTextShort },
+            errorBanner: errHits
+          };
+        })();
+        """
+        mres = await execute_bridge(
+            "execute_javascript", {"script": mega_js, **tab_params}
+        )
+        if isinstance(mres, dict) and isinstance(mres.get("result"), dict):
+            _mega = mres["result"]
+    except Exception as e:
+        audit("megascan_error", error=str(e))
+        _mega = None
+
+    # 14. REQUIRED-FIELD-VALIDATOR
+    # WHY: Die haeufigste Ursache fuer "Weiter-Button tut nichts"-Loops sind
+    # unvollstaendig befuellte Pflichtfelder. HTML markiert diese mit
+    # required, aria-required="true", data-required oder durch Sterne (*)
+    # im Label. Wir zaehlen die noch leeren vor jedem Render und zwingen
+    # Vision sie auszufuellen BEVOR "Weiter" geklickt wird.
+    # CONSEQUENCES: Kein Blindklick mehr auf Submit-Buttons wenn noch
+    # Felder offen sind. Bricht die Endlosschleife "klick-Weiter -> Fehler
+    # -> klick-Weiter -> Fehler" sofort.
+    required_block = ""
+    global _LAST_EMPTY_REQUIRED
+    try:
+        # WHY: Frueher separater Bridge-Call; jetzt aus Mega-Scan gelesen.
+        # Kein Fallback — wenn _mega fehlt, ueberspringen wir diesen Block.
+        rdata = _mega.get("required") if isinstance(_mega, dict) else None
+        if isinstance(rdata, dict):
+            empties = rdata.get("empty") or []
+            submit_in_view = bool(rdata.get("submitInView"))
+            _LAST_EMPTY_REQUIRED = len(empties)
+            if empties and submit_in_view:
+                lines = [
+                    f"===== PFLICHTFELDER UNVOLLSTAENDIG ({len(empties)}) =====",
+                    "WARNUNG: 'Weiter/Submit'-Button ist sichtbar, aber mindestens ein",
+                    "Pflichtfeld ist noch leer. Klicke NICHT auf Weiter -> erst fuellen.",
+                    "Offene Pflichtfelder:",
+                ]
+                for e in empties[:10]:
+                    lines.append(
+                        f"  - {e.get('tag','?')}[{e.get('type','')}] '{e.get('label','')}' ref={e.get('ref','')}"
+                    )
+                lines.append(
+                    "REGEL: Beantworte diese Felder zuerst (Persona-konform), "
+                    "dann erst Weiter klicken. Wenn ein Feld unklar ist, waehle "
+                    "Neutral-Default (Mitte bei Skalen, 'keine Angabe' bei Demographie)."
+                )
+                required_block = "\n".join(lines)
+                audit("required_empty", count=len(empties))
+    except Exception as e:
+        audit("required_scan_error", error=str(e))
+
+    # 15. EUR-TOTALIZER
+    # WHY: HeyPiggy bestaetigt jeden Abschluss mit "+0.XX EUR gutgeschrieben"
+    # auf dem Dashboard oder einer Success-Seite. Wir aggregieren diese
+    # Betraege pro Run. Deduplication ueber exakten Banner-String plus
+    # Betrag+Timestamp damit Polling denselben Banner nicht doppelt zaehlt.
+    # CONSEQUENCES: run_summary.json + print_summary zeigen den Netto-Verdienst.
+    earnings_block = ""
+    global _SEEN_REWARD_STRINGS
+    try:
+        # WHY: Frueher separater Bridge-Call; jetzt aus Mega-Scan gelesen.
+        edata = _mega.get("reward") if isinstance(_mega, dict) else None
+        _rs = globals().get("CURRENT_RUN_SUMMARY")
+        if isinstance(edata, list) and edata and _rs is not None:
+            new_bookings = []
+            for entry in edata:
+                amount = float(entry.get("amount", 0))
+                ctx = str(entry.get("context", ""))[:80]
+                key = f"{round(amount, 2)}|{ctx}"
+                if key in _SEEN_REWARD_STRINGS:
+                    continue
+                _SEEN_REWARD_STRINGS.add(key)
+                if _rs.record_earning(amount, dedup_key=key):
+                    new_bookings.append((amount, ctx))
+            if new_bookings:
+                total = _rs.earnings_eur
+                lines = ["===== EUR GUTGESCHRIEBEN (NEU GEBUCHT) ====="]
+                for a, c in new_bookings:
+                    lines.append(f"  +{a:.2f} EUR | Kontext: '{c}'")
+                lines.append(f"Session-Summe jetzt: {total:.2f} EUR")
+                earnings_block = "\n".join(lines)
+                audit(
+                    "earnings_booked",
+                    new_count=len(new_bookings),
+                    session_total=total,
+                )
+    except Exception as e:
+        audit("earnings_scan_error", error=str(e))
+
+    # 16. PANEL-OVERRIDES (PureSpectrum / Dynata / Sapio / Cint / Lucid / HeyPiggy)
+    # WHY: Jeder Panel-Provider hat eigene Traps, DQ-Signale und Quality-Checks.
+    # Wir erkennen an URL + Body-Text welcher Provider aktiv ist und injizieren
+    # provider-spezifische Regeln (Attention-Checks, Min-Zeiten, Redirect-Quirks).
+    # CONSEQUENCES: Vision bekommt einen Cheatsheet statt jedes Mal neu zu raten
+    # — deutlich hoehere Completion-Rate bei Router-basierten Umfragen.
+    panel_block = ""
+    try:
+        # WHY: Frueher separater Bridge-Call; jetzt aus Mega-Scan gelesen.
+        _panel_url = ""
+        _panel_text = ""
+        if isinstance(_mega, dict):
+            p = _mega.get("panel") or {}
+            if isinstance(p, dict):
+                _panel_url = str(p.get("url", ""))
+                _panel_text = str(p.get("text", ""))
+        panel = detect_panel(url=_panel_url, body_text=_panel_text)
+        if panel is not None:
+            panel_block = build_panel_prompt_block(panel, body_text=_panel_text)
+            audit("panel_detected", panel=panel.name, url=_panel_url[:80])
+    except Exception as e:
+        audit("panel_scan_error", error=str(e))
+
+    # 17. ATTENTION-CHECK AUTO-SOLVER
+    # WHY: Panels bauen explizite Attention-Checks ein: "Um zu zeigen dass Sie
+    # aufmerksam sind, waehlen Sie bitte 'Stimme zu'". Wer die falsche Option
+    # klickt wird sofort disqualifiziert (manchmal OHNE Warnung). Die Persona-
+    # Logik darf diese Checks NICHT ueberschreiben — die Anweisung muss 1:1
+    # befolgt werden.
+    # CONSEQUENCES: Wir parsen den Fragetext nach expliziten "waehlen/select/
+    # klicken Sie X"-Mustern und injizieren einen MUSS-CLICK-Block in den
+    # Prompt. Vision wird angewiesen die genannte Option zu klicken, egal was
+    # Persona sagt.
+    attention_block = ""
+    try:
+        if _LAST_QUESTION_TEXT:
+            qtext = _LAST_QUESTION_TEXT
+            # Patterns: DE + EN, mit Anfuehrungszeichen-Erkennung
+            patterns = [
+                # "waehlen Sie bitte 'X'" / "select X"
+                r"(?:bitte\s+)?(?:w[aä]hlen|klicken|markieren|w[aä]hle|klicke|tippen?)\s+Sie\s+(?:bitte\s+)?['\"“„](.+?)['\"”“]",
+                r"(?:please\s+)?(?:select|choose|click|pick|mark|tap)\s+['\"“„](.+?)['\"”“]",
+                # Ohne Quotes: "waehlen Sie die Option X"
+                r"w[aä]hlen\s+Sie\s+(?:die\s+)?(?:option|antwort)\s+([A-Za-zÄÖÜäöüß0-9 ]{2,30}?)(?:[.,!?]|$)",
+                r"(?:please\s+)?(?:select|choose)\s+(?:the\s+)?(?:option|answer)\s+([A-Za-z0-9 ]{2,30}?)(?:[.,!?]|$)",
+                # "um zu zeigen dass Sie aufmerksam sind": meist gefolgt von Anweisung
+                r"aufmerksam(?:keit)?[^.!?]{0,60}['\"“„](.+?)['\"”“]",
+                r"attention[^.!?]{0,60}['\"“„](.+?)['\"”“]",
+            ]
+            want_value = None
+            for pat in patterns:
+                m = re.search(pat, qtext, re.IGNORECASE)
+                if m:
+                    want_value = m.group(1).strip()
+                    if len(want_value) >= 2 and len(want_value) <= 80:
+                        break
+                    want_value = None
+            if want_value:
+                # Finde die passende Option in clickable_info (als Hilfe für Vision)
+                attention_block = (
+                    "===== ATTENTION-CHECK ERKANNT — MUSS-KLICK =====\n"
+                    f"Die Frage enthaelt eine EXPLIZITE Anweisung: '{want_value}' "
+                    "muss als Antwort gewaehlt werden.\n"
+                    "REGEL: Ignoriere in diesem Schritt die Persona. Suche im "
+                    "Clickable-Snapshot die Option deren Label oder Text genau "
+                    f"oder moeglichst genau '{want_value}' entspricht und klicke sie. "
+                    "Falls mehrere Kandidaten: nimm den mit der kuerzesten Levenshtein-"
+                    "Distanz zum Wunsch-Text. Kein Fallback, kein Raten — wenn die "
+                    "Option nicht auffindbar ist, scrolle zuerst die Seite ab."
+                )
+                audit("attention_check_detected", want=want_value[:60])
+    except Exception as e:
+        audit("attention_scan_error", error=str(e))
+
+    # 18. OPEN-ENDED MINIMUM-LENGTH ENFORCER
+    # WHY: Fragen mit Freitext-Antwort haben oft "mindestens 20 Zeichen" oder
+    # "at least 3 words" — wenn der Text zu kurz ist, bleibt der Weiter-Button
+    # disabled. Vision weiss das oft nicht und tippt nur "ok" oder "gut".
+    # CONSEQUENCES: Wir parsen die Mindestlaenge aus Frage- und Fehler-Text
+    # und schreiben sie als harte Vorgabe in den Prompt.
+    minlen_block = ""
+    try:
+        if _LAST_QUESTION_TEXT:
+            qtext = _LAST_QUESTION_TEXT
+            min_chars = 0
+            min_words = 0
+            mc = re.search(
+                r"(?:mindestens|at least|min[.:\s]+)\s*(\d{1,3})\s*(?:zeichen|characters?|chars?|signs?)",
+                qtext,
+                re.IGNORECASE,
+            )
+            if mc:
+                try:
+                    min_chars = int(mc.group(1))
+                except ValueError:
+                    min_chars = 0
+            mw = re.search(
+                r"(?:mindestens|at least|min[.:\s]+)\s*(\d{1,3})\s*(?:w[oö]rter?|words?)",
+                qtext,
+                re.IGNORECASE,
+            )
+            if mw:
+                try:
+                    min_words = int(mw.group(1))
+                except ValueError:
+                    min_words = 0
+            if min_chars or min_words:
+                demands = []
+                if min_chars:
+                    demands.append(f"{min_chars} Zeichen")
+                if min_words:
+                    demands.append(f"{min_words} Woerter")
+                minlen_block = (
+                    "===== FREITEXT-MINDESTLAENGE ERKANNT =====\n"
+                    f"Die Frage verlangt: {', '.join(demands)}. "
+                    "REGEL: Die Antwort MUSS diese Laenge erreichen, sonst bleibt "
+                    "'Weiter' disabled. Formuliere Persona-plausibel in vollstaendigen "
+                    "Saetzen (keine Fuellwoerter, keine wiederholten Phrasen — "
+                    "Quality-Algorithmen erkennen 'xxxxxxxxx' oder 'test test test'). "
+                    "Lieber einen Satz mehr als einen zu wenig."
+                )
+                audit(
+                    "minlen_detected",
+                    min_chars=min_chars,
+                    min_words=min_words,
+                )
+    except Exception as e:
+        audit("minlen_scan_error", error=str(e))
+
+    # 19. ERROR-BANNER RECOVERY
+    # WHY: Wenn die Umfrage einen roten Fehler-Banner zeigt ("Bitte beantworten
+    # Sie alle Fragen", "Please answer all questions"), ist das ein expliziter
+    # Hinweis dass Required-Fields uebersehen wurden. Wir zwingen Vision dann
+    # zu einem Rescan statt nochmal Weiter zu klicken.
+    # CONSEQUENCES: Auch wenn Block 14 keine Pflichtfelder gemeldet hat (z.B.
+    # weil sie ohne [required] aber mit panel-eigener Validierung laufen),
+    # wird der Agent auf die Fehlermeldung reagieren.
+    errbanner_block = ""
+    try:
+        # WHY: Frueher separater Bridge-Call; jetzt aus Mega-Scan gelesen.
+        ebhits = _mega.get("errorBanner") if isinstance(_mega, dict) else None
+        if isinstance(ebhits, list) and ebhits:
+            errbanner_block = (
+                "===== VALIDIERUNGS-FEHLER SICHTBAR =====\n"
+                "Die Seite zeigt eine oder mehrere Fehler-Meldungen:\n"
+                + "\n".join(f"  * '{h}'" for h in ebhits[:4])
+                + "\nREGEL: Nicht erneut 'Weiter' klicken. Scrolle stattdessen zum "
+                "Fehler (meist rot, oben oder direkt unter dem betroffenen Feld), "
+                "identifiziere das unbeantwortete Feld und fuelle es aus. "
+                "Oft sind es: uebersehene Radio-Zeile in einer Matrix, ein leerer "
+                "Pflicht-Freitext oder ein nicht gesetztes Geburtsdatum-Dropdown."
+            )
+            audit("error_banner_detected", hit_count=len(ebhits))
+    except Exception as e:
+        audit("error_banner_error", error=str(e))
+
+    # 20. ANSWER-CONSISTENCY MEMO
+    # WHY: Panels stellen dieselbe Frage absichtlich mehrfach um zu pruefen ob
+    # der Befragte konsistent antwortet ("Wie alt sind Sie?" in Demographie
+    # + "Bitte bestaetigen Sie Ihr Alter" in der Validation-Phase). Wer sich
+    # widerspricht wird disqualifiziert UND riskiert permanente Sperrung.
+    # CONSEQUENCES: Wir merken uns pro Umfrage die gegebenen Antworten unter
+    # einem Frage-Hash. Bei Wiederauftauchen wird die gemerkte Antwort als
+    # PFLICHT-ANTWORT in den Prompt injiziert.
+    consistency_block = ""
+    try:
+        if _LAST_QUESTION_TEXT:
+            # Normalisierung: Kleinbuchstaben, Whitespace-Kollaps, Satzzeichen raus
+            norm = re.sub(r"\s+", " ", _LAST_QUESTION_TEXT.lower()).strip()
+            norm = re.sub(r"[.,;:!?\"'„“”‚‘’()\[\]]", "", norm)
+            qhash = hashlib.md5(norm.encode("utf-8")).hexdigest()[:16]
+            prior = _ANSWER_MEMO.get(qhash)
+            if prior:
+                consistency_block = (
+                    "===== KONSISTENZ-PFLICHT =====\n"
+                    "Diese Frage wurde in dieser Umfrage schon einmal beantwortet:\n"
+                    f"  Frueher: '{prior[:120]}'\n"
+                    "REGEL: Gib GENAU DIESELBE Antwort wieder. Ein Widerspruch fuehrt "
+                    "zu sofortigem DQ und moeglicher permanenter Sperrung bei diesem "
+                    "Panel. Wenn die genaue Option nicht mehr verfuegbar ist, waehle "
+                    "die semantisch naechste (z.B. gleicher Altersbereich, gleiche "
+                    "Haushalts-Groesse). Persona-Logik wird in diesem Schritt "
+                    "ignoriert."
+                )
+                audit("consistency_memo_hit", qhash=qhash)
+    except Exception as e:
+        audit("consistency_scan_error", error=str(e))
+
+    # 21. QUOTA-FULL DETECTION (NICHT als DQ lernen!)
+    # WHY: "Leider haben wir bereits genug Teilnehmer fuer diese Umfrage" ist
+    # KEIN Persoenlichkeits-DQ — morgen kann die Quote wieder offen sein. Wir
+    # setzen nur ein Flag damit der survey_done-Handler die URL nicht ins
+    # Brain als "avoid" schreibt. Ansonsten verpassen wir uns selbst durch
+    # zu aggressives Lernen legitime Umfragen.
+    # CONSEQUENCES: Flag wird beim Survey-Start wieder geleert.
+    global _QUOTA_FULL_DETECTED
+    try:
+        qtext = (_panel_text or "").lower()
+        quota_markers = [
+            "quote erreicht",
+            "quote bereits erreicht",
+            "quote voll",
+            "quota full",
+            "quota has been filled",
+            "quota reached",
+            "survey is full",
+            "umfrage ist voll",
+            "leider haben wir bereits genug",
+            "this survey is no longer accepting",
+            "nicht mehr verfuegbar",
+            "bereits genug teilnehmer",
+        ]
+        if any(m in qtext for m in quota_markers):
+            _QUOTA_FULL_DETECTED = True
+            audit("quota_full_detected")
+    except Exception as e:
+        audit("quota_scan_error", error=str(e))
+
+    return "\n\n".join(
+        filter(
+            None,
+            [
+                page_context,
+                snapshot_info,
+                clickable_info,
+                media_block,
+                question_block,
+                screener_block,
+                obstacle_block,
+                dashboard_block,
+                media_unlock_block,
+                matrix_block,
+                slider_block,
+                spinner_block,
+                loop_block,
+                required_block,
+                earnings_block,
+                panel_block,
+                attention_block,
+                minlen_block,
+                errbanner_block,
+                consistency_block,
+            ],
+        )
+    )
 
 
 # ============================================================================
-# VISION GATE — Gemini 3 Flash Analyse mit gehärtetem Prompt + DOM-Kontext
+# PERSONA + TRAP / ATTENTION-CHECK PROMPT-BAUSTEINE
+# WHY: Umfragen sind voller Fallen — Pre-Qualifikation, Aufmerksamkeits-Checks,
+# Konsistenz-Traps (gleiche Frage in anderer Formulierung), Trick-Fragen
+# ("Haben Sie in den letzten 6 Monaten Produkt X gekauft?"). Der Agent muss
+# diese wie ein Meister erkennen und Persona-konsistent beantworten — sonst
+# Rausflug und 0 Cent.
+# CONSEQUENCES: Die folgenden Helfer bauen kompakte Prompt-Bausteine die vor
+# dem eigentlichen Survey-Prompt injiziert werden. Sie sind billig (kein LLM-
+# Call) und laufen bei jedem Step neu.
+# ============================================================================
+
+
+def _collect_recent_answers(limit: int = 8) -> list[dict[str, object]]:
+    """Lese die letzten N Antworten aus dem ANSWER_LOG JSONL-File."""
+    if ANSWER_LOG is None or not ANSWER_LOG.log_path.exists():
+        return []
+    try:
+        lines = ANSWER_LOG.log_path.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return []
+    out: list[dict[str, object]] = []
+    for raw in lines[-limit * 2 :]:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            out.append(json.loads(raw))
+        except Exception:
+            continue
+    return out[-limit:]
+
+
+def _build_persona_answer_hint(
+    question_text: str | None,
+    options: list[str],
+) -> str:
+    """
+    Loest die aktuelle Frage gegen die Persona auf und gibt einen MUSS-Hinweis aus.
+
+    WHY: Wenn im Profil "gender=male" steht und die Frage "Bitte waehlen Sie
+    Ihr Geschlecht" zeigt "Maennlich" als Option, DARF das Vision-LLM die Frage nicht
+    zufaellig beantworten. Wir geben ihm die Pflicht-Antwort direkt im Prompt.
+    CONSEQUENCES: Leerer String wenn keine Frage erkannt oder kein Match gefunden.
+    """
+    if ACTIVE_PERSONA is None or not question_text:
+        return ""
+    try:
+        result = resolve_answer(ACTIVE_PERSONA, question_text, options or [])
+    except Exception:
+        return ""
+    if not result or result.get("confidence") == "unknown":
+        return ""
+
+    lines = ["===== PERSONA-MUSS-ANTWORT FUER AKTUELLE FRAGE ====="]
+    lines.append(f"Frage: {question_text[:200]}")
+    topic = result.get("topic")
+    raw = result.get("raw_value")
+    matched = result.get("matched_option")
+    reason = result.get("reason", "")
+    conf = result.get("confidence", "medium")
+
+    if matched:
+        if isinstance(matched, list):
+            lines.append(
+                f"PFLICHT-OPTIONEN (multi-select): {', '.join(str(m) for m in matched)}"
+            )
+        else:
+            lines.append(f"PFLICHT-OPTION (genau diese klicken): {matched}")
+    if raw not in (None, "", 0, [], ()):
+        lines.append(f"Persona-Rohwert: {raw} (Feld: {topic})")
+    lines.append(f"Confidence: {conf} — {reason}")
+    lines.append(
+        "REGEL: Wenn die PFLICHT-OPTION sichtbar ist, klicke GENAU DIESE — "
+        "niemals eine andere. Bei Mehrfachauswahl klicke ALLE gelisteten Optionen."
+    )
+    # Bei Einkommen / Bracket-Fragen Persona-Rohwert fuer Bracket-Auswahl
+    if topic and topic.startswith("income_") and raw:
+        lines.append(
+            f"Falls nur Brackets sichtbar sind: waehle das Bracket das {raw} EUR enthaelt."
+        )
+    return "\n".join(lines)
+
+
+def _build_consistency_block(question_text: str | None) -> str:
+    """
+    Sucht im Answer-Log nach einer semantisch aehnlichen frueheren Frage und
+    injiziert die damalige Antwort als MUSS-Wiederholung.
+
+    WHY: Attention-Traps stellen dieselbe Frage 2-3x unterschiedlich formuliert.
+    Wenn wir zuerst "34" und spaeter "35" sagen, disqualifizieren wir uns selbst.
+    """
+    if ANSWER_LOG is None or not question_text:
+        return ""
+    try:
+        prior = ANSWER_LOG.find_prior_answer(question_text, similarity_threshold=0.72)
+    except Exception:
+        prior = None
+    if not prior:
+        return ""
+    return (
+        "===== KONSISTENZ-TRAP ERKANNT =====\n"
+        f"Aehnliche Frage wurde bereits beantwortet (sim>=0.72):\n"
+        f"- Damals: '{str(prior.get('question', ''))[:160]}'\n"
+        f"- Antwort: '{str(prior.get('answer', ''))[:160]}'\n"
+        f"- Topic: {prior.get('topic')} | Confidence: {prior.get('confidence')}\n"
+        "REGEL: Gib GENAU DIESELBE Antwort wie damals, auch wenn die Formulierung "
+        "heute anders klingt. Inkonsistenz = Disqualifikation."
+    )
+
+
+_TRAP_DETECTION_RULES_PROMPT = """===== UMFRAGE-FALLEN & PRE-QUALIFIKATION — MEISTER-MODUS =====
+Du agierst wie ein erfahrener Panelist. Jede Umfrage hat VIER Fallentypen — erkenne und meistere sie:
+
+1) PRE-QUALIFIKATION / SCREENING (meist die ersten 3-8 Fragen):
+   - Ziel der Umfrage: aussortieren, WER antworten darf (Alters-, Regions-, Berufs-, Produkt-Nutzungs-Filter).
+   - Regel: Beantworte EHRLICH aus Persona. Wenn Persona negativ -> Disqualifikation akzeptieren (niemals luegen!).
+   - Typische Frage: "Arbeiten Sie in Marketing / Marktforschung / Medien?" -> AUS PERSONA (meistens "Nein").
+   - Typische Frage: "Haben Sie in den letzten 3 Monaten Produkt X gekauft?" -> aus brand_preferences / extra_facts.
+   - NIEMALS "Ja" nur um reinzukommen — Folge-Fragen decken die Luege auf = Rausflug + Sperre.
+
+2) ATTENTION CHECK (ueberall, besonders Mitte):
+   - Explizit: "Bitte waehlen Sie 'Option 3' um zu zeigen dass Sie die Frage lesen."
+   - Implizit: Doppelte Verneinung, widerspruechliche Skala, "Wie heisst dieser Button?".
+   - Regel: Lies die Frage WORTWOERTLICH. Klicke genau das angeforderte Element.
+
+3) KONSISTENZ-TRAP (gleiche Info zweimal, anders formuliert):
+   - Frage 1: "Wie alt sind Sie?" -> Frage 20: "In welchem Jahr wurden Sie geboren?"
+   - Frage 1: "Haushaltseinkommen?" -> Frage 15: "Welches Bracket trifft auf Ihr Jahresbrutto zu?"
+   - Regel: Nutze IMMER Persona + Answer-Log oben. Gleicher Sachverhalt -> gleiche Antwort.
+
+4) FOLGE-FRAGEN / BRANCHING (eine Frage haengt semantisch von einer frueheren ab):
+   - "Welche Marke haben Sie gekauft?" setzt voraus dass in Frage 5 "Haben Sie gekauft?" = Ja war.
+   - Regel: Branching-Antworten MUESSEN zur frueheren Ja/Nein-Antwort passen. Sonst Disqualifikation.
+   - Wenn Persona sagt "kein Auto", darfst du bei "Welches Auto fahren Sie?" NICHT raten — waehle
+     "Keines" / "Kein Auto" / "Trifft nicht zu" wenn sichtbar; sonst die neutralste Option.
+
+ANTWORT-STRATEGIE (in dieser Reihenfolge):
+  a) PERSONA-MUSS-ANTWORT oben -> genau diese Option klicken.
+  b) KONSISTENZ-TRAP-Block oben -> damalige Antwort wiederholen.
+  c) Wenn weder a) noch b): waehle die Persona-plausibelste sichtbare Option
+     (neutral, mittlere Skala, "Trifft zu" nur wenn Persona es hergibt).
+  d) NIEMALS "Keine Angabe" / "prefer not to say" wenn eine konkrete Option
+     aus der Persona abgeleitet werden kann — Panels bestrafen diese Antwort.
+
+MEHRFACHAUSWAHL (Checkboxen):
+  - Wenn Persona Multi-Werte hat (hobbies, streaming_services), klicke ALLE passenden.
+  - Bei "Keins davon" + gleichzeitig passende Persona-Option -> passende Option, NICHT "keins".
+
+FREITEXT-FELDER:
+  - Kurze, konkrete, Persona-konsistente Antwort. Keine Emojis, keine Werbung, keine Scherze.
+  - Bei "Warum?" Fragen: ein nuechterner, 10-25 Woerter langer Satz.
+
+VERBOTEN (fuehrt zur Sperre):
+  - Luegen um Pre-Qualifikation zu bestehen.
+  - Zufaellig antworten wenn Persona einen klaren Wert hat.
+  - Bei Attention-Checks die falsche Option klicken.
+  - Unterschiedliche Antworten auf semantisch gleiche Fragen geben.
+"""
+
+
+# ============================================================================
+# VISION GATE — NVIDIA NIM Llama-3.2-Vision Analyse mit gehaertetem Prompt + DOM-Kontext
 # ============================================================================
 
 
@@ -2026,129 +3840,11 @@ def _vision_cache_put(
     audit("vision_cache_store", step=step_num, hash=screenshot_hash[:8])
 
 
-def build_vision_prompt(
-    action_desc: str,
-    expected: str,
-    dom_snapshot: str,
-    *,
-    step_num: int,
-    profile_context: str = "",
-    fail_learning_context: str = "",
-) -> str:
-    return f"""Du bist der Vision Gate Controller der OpenSIN-Bridge.
-
-KONTEXT:
-- Letzte Aktion: '{action_desc}'
-- Erwartetes Ergebnis: '{expected}'
-- Schritt Nummer: {step_num} von maximal {MAX_STEPS}
-
-{profile_context}
-
-{fail_learning_context}
-
-{dom_snapshot}
-
-Analysiere Screenshot und DOM-Daten.
-Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Fences.
-
-Schema:
-{{
-  "verdict": "PROCEED|STOP|RETRY|ESCALATE",
-  "page_state": "dashboard|login|onboarding|survey|survey_active|survey_done|captcha|error|unknown",
-  "reason": "Kurze Analyse...",
-  "progress": true,
-  "next_action": "click_element|click_ref|ghost_click|vision_click|click_coordinates|keyboard|type_text|navigate|scroll_down|scroll_up|none",
-  "next_params": {{}}
-}}"""
-
-
-def _strip_markdown_fences(raw_text: str) -> str:
-    text = raw_text.strip()
-    if "```json" in text:
-        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in text:
-        parts = text.split("```")
-        if len(parts) >= 3:
-            text = parts[1].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-    if text and not text.lstrip().startswith("{"):
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start : end + 1]
-    return text
-
-
-def _validate_vision_decision(result: dict[str, object]) -> dict[str, object]:
-    verdict = str(result.get("verdict", "RETRY")).upper()
-    page_state = str(result.get("page_state", "unknown")).lower()
-    next_action = str(result.get("next_action", "none"))
-    next_params = result.get("next_params", {})
-    if verdict not in VISION_VERDICTS:
-        raise ValueError(f"invalid verdict: {verdict}")
-    if page_state not in VISION_PAGE_STATES:
-        raise ValueError(f"invalid page_state: {page_state}")
-    if not isinstance(next_params, dict):
-        raise ValueError("next_params must be dict")
-    return {
-        "verdict": verdict,
-        "page_state": page_state,
-        "reason": str(result.get("reason", "")),
-        "progress": bool(result.get("progress", False)),
-        "next_action": next_action,
-        "next_params": next_params,
-    }
-
-
-def parse_vision_response(raw_text: str) -> dict[str, object]:
-    cleaned = _strip_markdown_fences(raw_text)
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\b(PROCEED|STOP|RETRY|ESCALATE)\b", raw_text.upper())
-        if match:
-            return {
-                "verdict": match.group(1),
-                "page_state": "unknown",
-                "reason": "text fallback verdict extraction",
-                "progress": False,
-                "next_action": "none",
-                "next_params": {},
-            }
-        return {
-            "verdict": "RETRY",
-            "page_state": "unknown",
-            "reason": "complete parse failure",
-            "progress": False,
-            "next_action": "none",
-            "next_params": {},
-        }
-    if not isinstance(payload, dict):
-        return {
-            "verdict": "RETRY",
-            "page_state": "unknown",
-            "reason": "parsed payload was not an object",
-            "progress": False,
-            "next_action": "none",
-            "next_params": {},
-        }
-    try:
-        return _validate_vision_decision(payload)
-    except ValueError as exc:
-        return {
-            "verdict": "RETRY",
-            "page_state": "unknown",
-            "reason": str(exc),
-            "progress": False,
-            "next_action": "none",
-            "next_params": {},
-        }
-
-
 async def ask_vision(screenshot_path: str, action_desc: str, expected: str, step_num: int):
     """
-    Sendet einen Screenshot + DOM-Kontext an Gemini 3 Flash.
+    Sendet einen Screenshot + DOM-Kontext ans konfigurierte Vision-LLM
+    (Primary: NVIDIA NIM meta/llama-3.2-11b-vision-instruct,
+     Fallback: microsoft/phi-3.5-vision-instruct, microsoft/phi-3-vision-128k-instruct).
     WHY: KEIN EINZIGER KLICK ohne dass das Vision-Modell den Bildschirm gesehen hat.
     CONSEQUENCES: Bei Parse-Fehler wird RETRY zurückgegeben (nie ein Crash).
     """
@@ -2166,20 +3862,167 @@ async def ask_vision(screenshot_path: str, action_desc: str, expected: str, step
     dom_context = await dom_prescan()
 
     # Profil-Kontext aus gespeichertem User-Profil laden
-    # WHY: Gemini muss wissen wer der User ist um Profil-Fragen korrekt zu beantworten.
-    #      Ohne Profil würde Gemini zufällig wählen → falsche Region, falscher Name etc.
+    # WHY: Das Vision-LLM muss wissen wer der User ist um Profil-Fragen korrekt zu beantworten.
+    #      Ohne Profil wuerde es zufaellig waehlen -> falsche Region, falscher Name etc.
     profile_context = _build_profile_context()
     fail_learning_context = build_fail_learning_context()
-    sitepack_context = build_sitepack_context()
 
-    prompt = build_vision_prompt(
-        action_desc,
-        expected,
-        "\n\n".join(filter(None, [sitepack_context, dom_context])),
-        step_num=step_num,
-        profile_context=profile_context,
-        fail_learning_context=fail_learning_context,
+    # ---- PERSONA + GLOBAL BRAIN KONTEXT ----
+    # WHY: Der Worker darf NIEMALS luegen. Persona = harte Fakten, Answer-Log =
+    # Konsistenz ueber Validation-Traps, Brain = Flotten-Wissen aus frueheren Runs.
+    # CONSEQUENCES: Wenn zu einer Frage bereits ein Persona-Fact existiert, wird er
+    # als MUSS-ANTWORT markiert — das Vision-LLM darf die dann NICHT veraendern.
+    persona_block = build_persona_prompt_block(
+        ACTIVE_PERSONA,
+        _collect_recent_answers(limit=8),
     )
+    brain_block = build_brain_prompt_block(_BRAIN_PRIME_CONTEXT or PrimeContext())
+    persona_hint_block = _build_persona_answer_hint(
+        _LAST_QUESTION_TEXT, _LAST_QUESTION_OPTIONS
+    )
+    consistency_block = _build_consistency_block(_LAST_QUESTION_TEXT)
+    trap_rules_block = _TRAP_DETECTION_RULES_PROMPT
+
+    prompt = f"""Du bist der Vision Gate Controller der OpenSIN-Bridge.
+
+KONTEXT:
+- Letzte Aktion: '{action_desc}'
+- Erwartetes Ergebnis: '{expected}'
+- Schritt Nummer: {step_num} von maximal {MAX_STEPS}
+
+{persona_block}
+
+{brain_block}
+
+{persona_hint_block}
+
+{consistency_block}
+
+{profile_context}
+
+{fail_learning_context}
+
+{trap_rules_block}
+
+{dom_context}
+
+AUFGABE — Analysiere den Screenshot UND die DOM-Daten oben PRÄZISE:
+
+1. BLOCKIERUNGEN: Sind Captchas, Cookie-Banner, Consent-Modals, Login-Dialoge, Popups, Overlays oder Error-Messages sichtbar?
+   �� Wenn ja: Diese ZUERST schliessen/akzeptieren!
+
+2. AKTUELLER STATUS: Was zeigt die Seite GENAU an?
+
+3. FORTSCHRITT: Hat sich gegenüber der letzten Aktion etwas verändert?
+
+4. NÄCHSTE AKTION: Was muss als nächstes passieren?
+
+VERFÜGBARE AKTIONEN (wähle GENAU EINE):
+- "click_element" — Standard CSS-Selektor Klick. Params: {{"selector": "#id-oder-.klasse"}}
+- "click_ref" — Klick per Accessibility-Tree-Ref (z.B. @e9). BEVORZUGT für Radio-Buttons, Checkboxen, Links ohne ID! Params: {{"ref": "@e9"}}
+- "ghost_click" — Voller Pointer+Mouse Event-Stack für SPA/React-Elemente. Params: {{"selector": "#echte-id"}}
+- "vision_click" — Beschreibungsbasierter Klick. Params: {{"description": "Text des Elements"}}
+- "click_coordinates" — Absoluter Pixel-Klick. Params: {{"x": 100, "y": 200}}
+- "keyboard" — Tastatur verwenden (z.B. Tab, Enter). Params: {{"keys": ["Enter"], "selector": "#optional-id"}}
+- "type_text" — Text eingeben. Params: {{"selector": "css", "text": "wert"}}
+- "navigate" — URL aufrufen. Params: {{"url": "https://..."}}
+- "scroll_down" — Seite nach unten scrollen
+- "scroll_up" — Seite nach oben scrollen
+- "none" — Aufgabe erledigt, nichts mehr zu tun
+
+ABSOLUTE PFLICHT-REGELN FÜR SELEKTOREN:
+- NUTZE NUR Selektoren aus der DOM-Analyse oben! NIEMALS raten!
+- Pseudo-Selektoren wie :has-text(), :contains(), :has() sind VERBOTEN (existieren nicht in CSS)!
+- Bevorzuge #id Selektoren (z.B. #survey-65076903) — die sind IMMER eindeutig!
+- WICHTIG: input[type='radio'][value='X'] NIEMALS nutzen — HeyPiggy Radio-Buttons haben KEINE value= Attribute!
+- Für Radio-Buttons → IMMER click_ref mit dem @eX Ref aus dem ACCESSIBILITY-TREE oben nutzen!
+- Für Survey-Karten auf HeyPiggy: Die Klasse ist .survey-item (NICHT .survey-card!), jede Karte hat eine eindeutige ID wie #survey-XXXXXXXX
+- Nutze ghost_click für alle div-basierten Karten (cursor: pointer)
+- Playwright-only Texte-Selektoren wie :contains(), :has-text() oder :text() sind VERBOTEN.
+- Wenn du Textreferenz brauchst, nenne den echten CSS-Selektor aus dem DOM-Pre-Scan oder eine eindeutige #id.
+- CONSENT-MODAL "Nächste" Button: IMMER #submit-button-cpx nutzen! NIEMALS button.modal-button-positive — das trifft dutzende versteckte Buttons im DOM und funktioniert nicht!
+
+KLICK-STRATEGIE:
+- Für Radio-Buttons ([radio @eX] im Accessibility-Tree) → click_ref mit {{"ref": "@eX"}} — das ist PFLICHT!
+- Für <button>, <a>, <input> → click_element
+- Für div.survey-item / div[cursor=pointer] → ghost_click mit #id-Selektor
+- Für Elemente ohne CSS-Selektor → vision_click mit Beschreibung
+- Letzter Ausweg → click_coordinates mit x,y aus der DOM-Analyse
+
+PAGE STATE REGELN — KRITISCH:
+- "dashboard" → HeyPiggy Startseite mit Survey-Liste, noch keine Umfrage gestartet
+- "login" → Login-Formular sichtbar
+- "onboarding" → Profil-Modal/Onboarding-Fragen (Region, Name, etc.) — VOR dem eigentlichen Dashboard!
+- "survey_active" → UMFRAGE LÄUFT GERADE! Fragen werden angezeigt (Radio-Buttons, Dropdowns, Textfelder, Skalen). NIEMALS "none" zurückgeben solange Fragen sichtbar sind!
+- "survey_audio" → Audio-Frage aktiv — ein Clip spielt oder muss abgespielt werden. Die transkribierte Version findest du im MEDIA-ANALYSE Block oben!
+- "survey_video" → Video-Frage aktiv — ein Clip spielt oder muss abgespielt werden. Die semantische Analyse findest du im MEDIA-ANALYSE Block oben!
+- "survey_image" → Bild-Frage aktiv — ein Bild muss inspiziert werden (das Vision-LLM sieht es direkt im Screenshot).
+- "survey" → Survey-Auswahl / Übergangsseite (zwischen Dashboard und aktiver Umfrage)
+- "survey_done" → Umfrage erfolgreich abgeschlossen, Bestätigungsseite (eine weitere Umfrage wird automatisch folgen!)
+- "error" → Fehlermeldung, Timeout oder unbekannter Zustand
+- "unknown" → Seite nicht klar erkennbar
+
+MEDIA-FRAGEN REGELN — KRITISCH:
+- Wenn ein MEDIA-ANALYSE Block oben steht: NUTZE IHN! Die Audio-Transkripte und Video-Beschreibungen zeigen dir genau was gefragt wird.
+- Audio-Clip auf der Seite + Frage "Welche Marke/Produkt/Slogan hörten Sie?" → wähle die Antwort die zum Transkript passt.
+- Video-Clip auf der Seite + Frage "Was macht die Person/Welche Marke?" → nutze "Marken gesichtet" und "Aktionen" aus der Analyse.
+- Wenn Media-Analyse fehlschlägt (error gesetzt): versuche auf Play zu klicken, warte auf Untertitel/Captions, und wähle die PLAUSIBELSTE Antwort aus den sichtbaren Optionen — NIEMALS "weiß nicht" oder "keine Angabe" wenn es eine echte Option gibt!
+- Nach Audio/Video: erst Clip komplett hören/sehen (page_state = "survey_audio"/"survey_video"), dann erst "Weiter" klicken.
+
+PROFIL-FRAGEN REGELN — KRITISCH:
+- Wenn ein Modal mit Profil-Fragen sichtbar ist (Region, Wohnort, Geschlecht, Name, Alter etc.):
+  page_state="onboarding" setzen!
+- Nutze IMMER das BENUTZERPROFIL oben um die korrekte Antwort zu wählen!
+- Region-Frage ("In welcher Region wohnst du?"): IMMER "Norden" wählen (Jeremy wohnt in Berlin, wählt Norden)
+- Nach Auswahl der Antwort → "Nächste"/"Weiter" Button klicken!
+- Profil-Modals MÜSSEN vollständig ausgefüllt werden bevor Umfragen gestartet werden!
+
+UMFRAGE-REGELN — ABSOLUT KRITISCH:
+- Wenn page_state="survey_active": BEENDE DIE UMFRAGE VOLLSTÄNDIG! Klicke ALLE Fragen durch bis zur Bestätigungsseite!
+- Wenn eine Frage sichtbar ist → IMMER beantworten und "Weiter"/"Next"/"Submit" klicken!
+- NIEMALS next_action="none" wenn noch Fragen offen sind!
+- Radio-Button Fragen → click_ref mit dem @eX Ref aus dem Accessibility-Tree (NICHT click_element mit value=!)
+- Dropdown-Fragen → click_element auf die gewünschte Option
+- Freitext-Fragen → type_text mit einer sinnvollen Antwort
+- Skalen-Fragen (1-5, 1-7, etc.) → click_element auf mittlere oder positive Option
+- "Weiter"/"Next"/"Fortfahren"/"Continue"/"Submit" Buttons → IMMER klicken nach einer Antwort!
+- Fortschrittsbalken sichtbar? → Umfrage läuft noch, page_state="survey_active"!
+
+CAPTCHA-ERKENNUNG — KRITISCH:
+- Captcha-Checkbox sichtbar ("I am not a robot" / "Ich bin kein Roboter") → page_state="captcha" setzen!
+- Captcha-Checkbox → click_ref mit dem @eX Ref aus dem Accessibility-Tree!
+- Bilderauswahl-Captcha → Vision erkennt die richtigen Bilder und klickt sie!
+- Bei Captcha: NIEMALS verdict="STOP"! Captchas können gelöst werden!
+
+ANTWORT-KONSISTENZ — RAUSFLUG-VERMEIDUNG:
+- Vergleiche aktuelle Frage mit BENUTZERPROFIL und FRÜHEREN ANTWORTEN oben!
+- Gleiche Frage → GLEICHE Antwort wie früher!
+- Profil-Fragen (Alter, Geschlecht, Region) → IMMER aus BENUTZERPROFIL!
+- Widersprüchliche Antworten = Rausflug-Gefahr = VERMEIDEN!
+- "None of the above" NUR wenn wirklich keine Option passt!
+- Mittlere/positive Optionen bevorzugen bei Skalenfragen!
+
+REGELN:
+- Antworte AUSSCHLIESSLICH mit gültigem JSON! Kein Markdown, kein Text!
+- Bei Captchas: page_state="captcha" und click_ref auf Checkbox! NICHT STOP!
+- Nur bei unlösbaren Blockierungen (kein Captcha): verdict="STOP"
+- Bei unveränderter Seite: verdict="RETRY" und schlage eine ANDERE Methode vor!
+- Credentials NIEMALS ausgeben! Nutze "<EMAIL>" und "<PASSWORD>" als Platzhalter.
+- Wähle IMMER die lukrativste verfügbare Umfrage (höchster €-Betrag)!
+
+ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
+{{
+  "verdict": "PROCEED",
+  "page_state": "dashboard|login|onboarding|survey|survey_active|survey_audio|survey_video|survey_image|survey_done|captcha|error|unknown",
+  "reason": "Kurze Analyse...",
+  "progress": true,
+  "next_action": "click_ref",
+  "next_params": {{"ref": "@e9"}},
+  "question_text": "Nur bei survey_* / onboarding — Frage wortwoertlich aus DOM, sonst leer.",
+  "answer_text": "Nur bei survey_* / onboarding — Antwort-Text den du gleich klickst, sonst leer.",
+  "question_topic": "age|gender|country|region|city|income|employment|occupation|education|marital|household|children|housing|car|smoking|alcohol|hobbies|brand|attention_check|screening|other|",
+  "trap_detected": "none|attention_check|consistency|screening|branching"
+}}"""
 
     run_result = await run_vision_model(
         prompt,
@@ -2206,18 +4049,62 @@ async def ask_vision(screenshot_path: str, action_desc: str, expected: str, step
             "progress": False,
         }
 
-    full_text = str(run_result.get("text", ""))
-    result = parse_vision_response(full_text)
-    audit(
-        "vision_check",
-        step=step_num,
-        verdict=result.get("verdict"),
-        page_state=result.get("page_state"),
-        reason=str(result.get("reason", ""))[:150],
-        next_action=result.get("next_action"),
-    )
-    _vision_cache_put(screenshot_hash, action_desc, step_num, result)
-    return result
+    full_text = run_result.get("text", "")
+
+    try:
+        # Markdown-Block entfernen falls vorhanden
+        if "```json" in full_text:
+            full_text = full_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in full_text:
+            parts = full_text.split("```")
+            if len(parts) >= 3:
+                full_text = parts[1].strip()
+                # Falls der erste Teil nach ``` mit "json" beginnt, entfernen
+                if full_text.startswith("json"):
+                    full_text = full_text[4:].strip()
+
+        if full_text and not full_text.lstrip().startswith("{"):
+            start = full_text.find("{")
+            end = full_text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                full_text = full_text[start : end + 1]
+
+        result = json.loads(full_text)
+        audit(
+            "vision_check",
+            step=step_num,
+            verdict=result.get("verdict"),
+            page_state=result.get("page_state"),
+            reason=result.get("reason", "")[:150],
+            next_action=result.get("next_action"),
+        )
+        _vision_cache_put(screenshot_hash, action_desc, step_num, result)
+        return result
+
+    except json.JSONDecodeError as e:
+        audit(
+            "error",
+            message=f"Vision JSON Parse Error: {e}",
+            step=step_num,
+            raw_output=full_text[:500],
+        )
+        return {
+            "verdict": "RETRY",
+            "reason": f"JSON Parse Error: {e}",
+            "next_action": "none",
+            "page_state": "unknown",
+            "progress": False,
+        }
+
+    except Exception as e:
+        audit("error", message=f"Vision Exception: {e}", step=step_num)
+        return {
+            "verdict": "RETRY",
+            "reason": str(e),
+            "next_action": "none",
+            "page_state": "unknown",
+            "progress": False,
+        }
 
 
 # ============================================================================
@@ -2367,57 +4254,6 @@ async def dom_verify_change(before_url: str, before_title: str):
         return {"changed": False, "error": str(e)}
 
 
-async def predicate_pre_check(
-    selector: str = "", x: int | None = None, y: int | None = None
-) -> dict[str, object]:
-    if not selector and (x is None or y is None):
-        return {"exists": True, "visible": True, "clickable": True, "occluded": False}
-    normalized_selector = normalize_selector(selector)
-    script = f"""
-    (function() {{
-      const selector = {json.dumps(normalized_selector)};
-      const x = {json.dumps(x)};
-      const y = {json.dumps(y)};
-      const el = selector ? document.querySelector(selector) : document.elementFromPoint(x, y);
-      if (!el) return {{ exists: false, visible: false, clickable: false, occluded: true }};
-      const rect = el.getBoundingClientRect();
-      const cx = x ?? Math.round(rect.left + rect.width / 2);
-      const cy = y ?? Math.round(rect.top + rect.height / 2);
-      const topEl = document.elementFromPoint(cx, cy);
-      const occluded = !!topEl && topEl !== el && !el.contains(topEl);
-      return {{
-        exists: true,
-        visible: el.offsetParent !== null,
-        clickable: typeof el.click === 'function',
-        occluded: occluded,
-      }};
-    }})();
-    """
-    result = await execute_bridge("execute_javascript", {"script": script, **_tab_params()})
-    if isinstance(result, dict) and isinstance(result.get("result"), dict):
-        return result["result"]
-    return {"exists": False, "visible": False, "clickable": False, "occluded": True}
-
-
-async def _dom_text_hash() -> str:
-    script = """
-    (function() {
-      return { text: (document.body && document.body.innerText ? document.body.innerText : '').trim() };
-    })();
-    """
-    result = await execute_bridge("execute_javascript", {"script": script, **_tab_params()})
-    if isinstance(result, dict) and isinstance(result.get("result"), dict):
-        text = str(result["result"].get("text", ""))
-    else:
-        text = ""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-async def predicate_post_check(before_hash: str) -> dict[str, object]:
-    new_hash = await _dom_text_hash()
-    return {"changed": bool(new_hash and new_hash != before_hash), "new_hash": new_hash}
-
-
 # ============================================================================
 # KLICK-ESKALATIONSKETTE — 5 Methoden mit Keyboard-Bypass, automatisch eskalierend
 # ============================================================================
@@ -2480,7 +4316,7 @@ async def escalating_click(
     if not selector and description:
         desc_lower = description.lower()
         if "umfrage" in desc_lower or "survey" in desc_lower or "€" in desc_lower:
-            selector = await resolve_survey_selector(sitepack_selector("survey_card"), description)
+            selector = await resolve_survey_selector("div.survey-item", description)
 
     methods = []
     if ref:
@@ -2756,51 +4592,39 @@ async def escalating_click(
 
 async def save_session(label: str):
     """
-    Sichert die aktuelle Browser-Session (Cookies, LocalStorage).
-    WHY: Bei Bridge-Disconnect oder Crash müssen wir die Session wiederherstellen können.
+    Sichert die aktuelle Browser-Session (Cookies + LocalStorage + SessionStorage).
+    WHY: Bei Bridge-Disconnect oder Crash muessen wir die Session wiederherstellen
+         koennen. Zusaetzlich wird der persistente Cross-Run-Cache
+         aktualisiert damit der naechste Worker-Start bereits angemeldet
+         starten kann (siehe session_store.py).
+    CONSEQUENCES: Zwei Dateien werden geschrieben:
+      1) Per-Run-Snapshot in SESSION_DIR (Debug + Crash-Recovery)
+      2) Cross-Run-Cache in ~/.heypiggy/session_cache.json (Login-Skip)
     """
+    # 1) Per-Run-Snapshot (wie bisher) — fuer Forensik pro Lauf
     try:
         params = _tab_params()
         cookies = await execute_bridge("export_all_cookies", params)
         session_file = SESSION_DIR / f"session_{label}_{RUN_ID}.json"
-        session_file.write_text(json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8")
+        session_file.write_text(
+            json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         audit("session_save", label=label, path=str(session_file))
     except Exception as e:
         audit("error", message=f"Session-Backup fehlgeschlagen: {e}")
 
-
-def _fresh_requested() -> bool:
-    return os.environ.get("HEYPIGGY_FRESH", "").lower() in ("1", "true", "yes")
-
-
-def _load_resume_checkpoint_for_current_run() -> StepContext | None:
-    if _fresh_requested():
-        return None
-    override = os.environ.get("HEYPIGGY_RESUME_CHECKPOINT_PATH", "")
-    if override:
-        return load_checkpoint(Path(override))
-    return load_checkpoint(CHECKPOINT_PATH)
-
-
-async def _get_current_page_url() -> str:
+    # 2) Cross-Run-Cache (Cookies + LocalStorage + SessionStorage)
+    # WHY: Panels wie Dynata/PureSpectrum geben nach einem Login 60-90 Min gueltige
+    # Session-Cookies aus. Wenn wir die zwischen Runs behalten, sparen wir uns
+    # Email/Password/2FA/Captcha bei jedem Start.
     try:
-        page_info = await execute_bridge("get_page_info", _tab_params())
-    except Exception:
-        return ""
-    if not isinstance(page_info, dict):
-        return ""
-    return str(page_info.get("url", ""))
-
-
-def _extract_earnings_from_summary(summary_path: Path) -> float:
-    if summary_path.exists():
-        try:
-            payload = json.loads(summary_path.read_text(encoding="utf-8"))
-        except Exception:
-            payload = {}
-        if isinstance(payload, dict):
-            return float(payload.get("earnings", 0.0) or 0.0)
-    return float(os.environ.get("HEYPIGGY_EARNINGS", "0") or 0.0)
+        await _session_dump(
+            execute_bridge=execute_bridge,
+            tab_params=_tab_params(),
+            audit=audit,
+        )
+    except Exception as e:
+        audit("session_persistent_error", label=label, error=str(e))
 
 
 # ============================================================================
@@ -2815,6 +4639,61 @@ async def human_delay(min_sec=1.5, max_sec=4.5):
     """
     delay = min_sec + random.random() * (max_sec - min_sec)
     await asyncio.sleep(delay)
+
+
+async def adaptive_think_delay(
+    question_text: str | None = None,
+    options: list[str] | None = None,
+    trap_detected: str = "none",
+    action_kind: str = "click",
+) -> float:
+    """
+    Adaptive Think-Time: simuliert realistische Lesedauer + Abwaegungszeit.
+
+    WHY: Bots sind daran erkennbar, dass sie JEDE Frage gleich schnell beantworten
+    — egal ob ein kurzer Ja/Nein-Screener oder ein 12-Optionen-Multi-Select mit
+    langer Erklaerung. Echte Menschen brauchen bei komplexeren Fragen laenger.
+    Panels messen die Response-Time pro Frage und markieren zu schnelle/gleich-
+    schnelle Befragte als "speeders" -> stille Disqualifikation ohne Reward.
+
+    BERECHNUNG:
+      - Basis: 1.2s - 2.5s (Latenz + Cursor-Bewegung)
+      - Lesezeit Frage: ~0.035s pro Zeichen (ca. 250 WPM)
+      - Lesezeit Optionen: 0.25s pro sichtbarer Option
+      - Trap-Bonus: +2-4s bei attention/consistency/screening (mehr Nachdenken)
+      - Freitext (type_text): +1-2s zusaetzlich fuer "Satz formulieren"
+      - Harte Obergrenze: 22s (kein Panel wartet ewig)
+
+    Returns den gewaehlten Delay in Sekunden (bereits asyncio.sleep'd).
+    """
+    base = 1.2 + random.random() * 1.3  # 1.2-2.5s
+    qlen = len(question_text or "")
+    read_q = min(qlen * 0.035, 6.0)  # max 6s Lesezeit Frage
+    nopts = len(options or [])
+    read_opts = min(nopts * 0.25, 3.5)  # max 3.5s Option-Scan
+
+    trap_bonus = 0.0
+    if trap_detected in ("attention_check", "consistency", "screening"):
+        trap_bonus = 2.0 + random.random() * 2.0  # 2-4s extra
+    elif trap_detected == "branching":
+        trap_bonus = 1.0 + random.random() * 1.5  # 1-2.5s
+
+    action_bonus = 0.0
+    if action_kind == "type_text":
+        action_bonus = 1.0 + random.random() * 1.0  # 1-2s fuer Satz-Formulierung
+    elif action_kind == "select_option":
+        action_bonus = 0.3 + random.random() * 0.4  # Dropdown-Oeffnen
+
+    delay = base + read_q + read_opts + trap_bonus + action_bonus
+    delay = max(0.8, min(delay, 22.0))
+
+    # Kleine Jitter + gelegentliche "Ueber-Denk-Pausen" (10% Chance +2s)
+    if random.random() < 0.10:
+        delay += 1.5 + random.random() * 1.0
+    delay = min(delay, 22.0)
+
+    await asyncio.sleep(delay)
+    return delay
 
 
 # ============================================================================
@@ -2883,7 +4762,13 @@ class VisionGateController:
         # LÖSUNG: Wenn wir mitten in einer aktiven Umfrage sind (survey_active),
         # gilt der Schritt IMMER als Fortschritt — egal ob Hash gleich ist.
         # Zusätzlich zählt dom_changed=True ebenfalls als Fortschritt.
-        currently_in_survey = page_state in ("survey_active", "survey")
+        currently_in_survey = page_state in (
+            "survey_active",
+            "survey",
+            "survey_audio",
+            "survey_video",
+            "survey_image",
+        )
         if (
             screenshot_hash
             and screenshot_hash == self.last_screenshot_hash
@@ -2939,6 +4824,30 @@ class VisionGateController:
                 "state_change",
                 message="DOM-Fortschritt bestätigt: no_progress_count zurückgesetzt",
             )
+
+    def reset_for_new_survey(self):
+        """
+        Setzt Pro-Survey-Counter zurück wenn eine neue Umfrage startet.
+        WHY: MAX_STEPS, consecutive_retries und no_progress_count sind gedacht
+             als Schutz gegen einzelne hängende Umfragen. Wenn der Orchestrator
+             eine neue Umfrage startet, soll dieses Budget frisch sein.
+             total_steps bleibt erhalten für globale Statistik.
+        CONSEQUENCES: Der Worker kann so 10+ Umfragen in einem Run abarbeiten,
+             ohne bei der 3. MAX_STEPS zu erreichen.
+        """
+        prev_steps = self.total_steps
+        self.total_steps = 0
+        self.consecutive_retries = 0
+        self.no_progress_count = 0
+        self.last_screenshot_hash = None
+        self.last_page_state = None
+        self.failed_selectors.clear()
+        self.clear_action_history()
+        audit(
+            "gate_reset_for_new_survey",
+            previous_total_steps=prev_steps,
+            message="Pro-Survey-Budget zurückgesetzt — neue Umfrage startet frisch",
+        )
 
 
 def _resolve_profile_value(field_hint: str) -> str | None:
@@ -3195,30 +5104,34 @@ async def _finalize_worker_run(
 
 
 async def main():
-    global CURRENT_RUN_SUMMARY, CURRENT_PAGE_FINGERPRINT
+    global CURRENT_RUN_SUMMARY, BUDGET_GUARD
     run_summary = RunSummary(run_id=RUN_ID)
     CURRENT_RUN_SUMMARY = run_summary
     gate = None
     recorder = None
     final_exit_reason = "startup"
     final_page_state = "unknown"
-    resume_checkpoint = _load_resume_checkpoint_for_current_run()
-    checkpoint_ctx = resume_checkpoint or StepContext(run_id=RUN_ID, state=AgentState.INIT)
-    if resume_checkpoint is None:
-        save_checkpoint(checkpoint_ctx, CHECKPOINT_PATH)
+
+    # Platform-Profil + Budget-Guard initialisieren.
+    # WHY: Der Worker bleibt Plattform-agnostisch — nur das Profil wechselt
+    # (HeyPiggy, Prolific, Clickworker, Attapoll, eigenes JSON).
+    # Der BudgetGuard zaehlt Tokens/Requests/EUR pro Run und "trippt" sich
+    # selbst wenn ein Limit erreicht wird. Der Main-Loop fragt tripped() pro
+    # Iteration ab und faehrt geordnet herunter wenn noetig.
+    prof = _active_platform()
+    BUDGET_GUARD = BudgetGuard.from_env(audit=audit)
 
     audit(
         "start",
-        message="A2A-SIN-Worker-HeyPiggy Vision Gate v2.0",
+        message=f"A2A-SIN-Worker ({prof.name}) Vision Gate v2.0",
         run_id=RUN_ID,
         artifact_dir=str(ARTIFACT_DIR),
+        platform=prof.name,
+        dashboard_url=prof.dashboard_url,
+        budget_max_tokens=BUDGET_GUARD.max_tokens or None,
+        budget_max_requests=BUDGET_GUARD.max_requests or None,
+        budget_max_eur=BUDGET_GUARD.max_eur or None,
     )
-    if resume_checkpoint is not None:
-        audit(
-            "resume",
-            message=f"RESUMING run {resume_checkpoint.run_id} from state {resume_checkpoint.state} step {resume_checkpoint.step_index}",
-            checkpoint=str(CHECKPOINT_PATH),
-        )
 
     # 1. BRIDGE-VERBINDUNG PRÜFEN
     try:
@@ -3226,7 +5139,6 @@ async def main():
     except Exception as e:
         final_exit_reason = f"bridge_connect_failed: {e}"
         run_summary.bridge_errors += 1
-        checkpoint_ctx = step_context_advance(checkpoint_ctx, CHECKPOINT_PATH, state="FAIL_SAFE")
         await _finalize_worker_run(run_summary, gate, final_exit_reason, final_page_state, recorder)
         audit("stop", reason=f"Bridge-Verbindung fehlgeschlagen: {e}")
         return
@@ -3248,14 +5160,10 @@ async def main():
         if not preflight.get("ok"):
             final_exit_reason = f"preflight_failed: {preflight.get('reason', 'unknown')}"
             run_summary.vision_errors += 1
-            checkpoint_ctx = step_context_advance(
-                checkpoint_ctx, CHECKPOINT_PATH, state="FAIL_SAFE"
-            )
             await _finalize_worker_run(
                 run_summary, gate, final_exit_reason, final_page_state, recorder
             )
             return
-    checkpoint_ctx = step_context_advance(checkpoint_ctx, CHECKPOINT_PATH, state="PREFLIGHT")
 
     # Credentials erst NACH erfolgreichem fail-closed Preflight auslesen.
     # WHY: Die eigentliche Worker-Logik braucht die Werte für inject_credentials(),
@@ -3270,52 +5178,164 @@ async def main():
         buffer_seconds=WORKER_CONFIG.recorder.buffer_seconds,
     )
     await recorder.start()
-    if resume_checkpoint is not None:
-        gate.total_steps = resume_checkpoint.step_index
-        gate.no_progress_count = resume_checkpoint.no_progress_counter
-        gate.last_screenshot_hash = resume_checkpoint.last_page_fingerprint or None
+
+    # 3a. MEDIA ROUTER + SURVEY ORCHESTRATOR INITIALISIEREN
+    # WHY: Diese beiden Subsysteme brauchen Zugriff auf execute_bridge und
+    # _tab_params — beide sind erst nach Bridge-Connect sinnvoll instanzierbar.
+    # CONSEQUENCES: Ab jetzt scannt dom_prescan() auch Media; der Orchestrator
+    # übernimmt die Multi-Survey-Koordination.
+    global MEDIA_ROUTER, SURVEY_ORCHESTRATOR
+
+    def _queue_audit(event: str, **data):
+        audit(event, **data)
+
+    if WORKER_CONFIG.media.enabled:
+        MEDIA_ROUTER = MediaRouter(
+            execute_bridge=execute_bridge,
+            tab_params_factory=_tab_params,
+            nvidia_api_key=NVIDIA_API_KEY,
+            audio_model=WORKER_CONFIG.media.audio_model,
+            video_model=WORKER_CONFIG.media.video_model,
+            nim_base_url=WORKER_CONFIG.nvidia.base_url,
+            audio_timeout=WORKER_CONFIG.media.audio_timeout,
+            video_timeout=WORKER_CONFIG.media.video_timeout,
+            frame_count=WORKER_CONFIG.media.video_frame_count,
+            language_hint=WORKER_CONFIG.media.language_hint,
+            audit=lambda msg: audit("media_router", message=msg),
+        )
+        audit(
+            "media_router_ready",
+            audio_model=WORKER_CONFIG.media.audio_model,
+            video_model=WORKER_CONFIG.media.video_model,
+        )
+    else:
+        audit("media_router_disabled")
+
+    # Skip-Callback: fragt das Global Brain ob eine URL bekanntermassen zu DQ
+    # fuehrt ODER ob wir sie im Rahmen der letzten 24h schon erfolgreich
+    # abgeschlossen haben. Beide Faelle -> ueberspringen.
+    # WHY: Kein Zeitverlust durch erneutes Durchlaufen von sicheren Fail-Umfragen
+    # oder doppeltes Ausfuellen derselben Umfrage (manche Panels erlauben das
+    # nicht und disqualifizieren sofort).
+    async def _orchestrator_should_skip(url: str) -> tuple[bool, str]:
+        try:
+            brain = globals().get("GLOBAL_BRAIN")
+            if brain is None or not url:
+                return False, ""
+            # Nur den URL-Path ohne Query fragen (Query-Params wechseln pro Session)
+            try:
+                from urllib.parse import urlparse
+                pu = urlparse(url)
+                key_url = f"{pu.scheme}://{pu.netloc}{pu.path}"
+            except Exception:
+                key_url = url
+            answer = await brain.ask(
+                f"Wurde die Umfrage-URL '{key_url}' in den letzten 48 Stunden "
+                "schon disqualifiziert ODER erfolgreich abgeschlossen? "
+                "Antworte NUR mit 'SKIP: <grund>' wenn ja, sonst mit 'OK'."
+            )
+            if not answer:
+                return False, ""
+            ans_low = answer.strip().lower()
+            if ans_low.startswith("skip"):
+                return True, answer.strip()[:200]
+            return False, ""
+        except Exception as e:
+            audit("orchestrator_skip_check_error", error=str(e))
+            return False, ""
+
+    SURVEY_ORCHESTRATOR = SurveyOrchestrator(
+        execute_bridge=execute_bridge,
+        tab_params_factory=_tab_params,
+        dashboard_url=WORKER_CONFIG.queue.dashboard_url,
+        explicit_urls=list(WORKER_CONFIG.queue.explicit_urls),
+        autodetect=WORKER_CONFIG.queue.autodetect,
+        max_surveys=WORKER_CONFIG.queue.max_surveys,
+        cooldown_sec=WORKER_CONFIG.queue.cooldown_sec,
+        cooldown_jitter=WORKER_CONFIG.queue.cooldown_jitter_sec,
+        audit=_queue_audit,
+        should_skip=_orchestrator_should_skip,
+    )
+    audit(
+        "orchestrator_ready",
+        max_surveys=WORKER_CONFIG.queue.max_surveys,
+        cooldown_sec=WORKER_CONFIG.queue.cooldown_sec,
+        autodetect=WORKER_CONFIG.queue.autodetect,
+        explicit_count=len(WORKER_CONFIG.queue.explicit_urls),
+    )
+
+    # 3b. PERSONA + GLOBAL BRAIN INITIALISIEREN
+    # WHY: Persona = harte Fakten, Answer-Log = Konsistenz, Brain = Flotten-Wissen.
+    # Alle drei sind optional — der Worker läuft auch ohne, fällt aber in den
+    # Legacy-Modus zurück der keine Wahrheits-Garantie gibt.
+    global ACTIVE_PERSONA, ANSWER_LOG, GLOBAL_BRAIN, _BRAIN_PRIME_CONTEXT
+    persona_cfg = WORKER_CONFIG.persona
+
+    if persona_cfg.enabled and persona_cfg.username:
+        try:
+            ACTIVE_PERSONA = load_persona(
+                persona_cfg.username, Path(persona_cfg.profiles_dir)
+            )
+            if ACTIVE_PERSONA is not None:
+                audit(
+                    "persona_loaded",
+                    username=persona_cfg.username,
+                    age=ACTIVE_PERSONA.age,
+                    country=ACTIVE_PERSONA.country,
+                    fields_set=sum(
+                        1
+                        for fn in ACTIVE_PERSONA.__dataclass_fields__
+                        if bool(getattr(ACTIVE_PERSONA, fn, None))
+                    ),
+                )
+            else:
+                audit("persona_not_found", username=persona_cfg.username)
+        except Exception as e:
+            audit("persona_load_error", error=str(e), username=persona_cfg.username)
+
+        try:
+            ANSWER_LOG = AnswerLog(
+                username=persona_cfg.username,
+                log_path=Path(persona_cfg.answer_log_path),
+            )
+            audit("answer_log_ready", path=str(ANSWER_LOG.log_path))
+        except Exception as e:
+            audit("answer_log_error", error=str(e))
+
+    if persona_cfg.brain_enabled:
+        try:
+            GLOBAL_BRAIN = GlobalBrainClient(
+                base_url=persona_cfg.brain_url,
+                project_id=persona_cfg.brain_project_id,
+                agent_id=persona_cfg.brain_agent_id,
+                persona_username=persona_cfg.username or None,
+                timeout_sec=persona_cfg.brain_timeout_sec,
+                audit=lambda event, **data: audit(event, **data),
+            )
+            _BRAIN_PRIME_CONTEXT = await GLOBAL_BRAIN.attach()
+        except Exception as e:
+            audit("brain_init_error", error=str(e))
+            _BRAIN_PRIME_CONTEXT = PrimeContext()
 
     # 4. INITIALE NAVIGATION
-    target_url = (
-        resume_checkpoint.task_url
-        if resume_checkpoint and resume_checkpoint.task_url
-        else sitepack_flow("login")[0]
-    )
-    action_desc = (
-        "Resume aktiven HeyPiggy Run"
-        if resume_checkpoint and resume_checkpoint.task_url
-        else "Navigiere zu HeyPiggy Dashboard"
-    )
-    expected = (
-        "Vorherige Survey oder Dashboard wird geladen"
-        if resume_checkpoint and resume_checkpoint.task_url
-        else "Dashboard mit verfügbaren Umfragen oder Login-Formular"
-    )
+    action_desc = "Navigiere zu HeyPiggy Dashboard"
+    expected = "Dashboard mit verfügbaren Umfragen oder Login-Formular"
 
     global CURRENT_TAB_ID, CURRENT_WINDOW_ID
     try:
-        audit("navigate", url=target_url)
+        audit("navigate", url="https://www.heypiggy.com/login")
         # KRITISCH: active: True — Tab MUSS im Vordergrund sein!
         # Mit active: False läuft der Tab im Hintergrund → Screenshots zeigen falschen Inhalt
         # → Vision Gate sieht nichts → DOM-Verifikation gibt url="" zurück → Worker hängt
-        tab_res = await execute_bridge("tabs_create", {"url": target_url, "active": True})
+        tab_res = await execute_bridge(
+            "tabs_create", {"url": "https://www.heypiggy.com/login", "active": True}
+        )
         if isinstance(tab_res, dict) and "tabId" in tab_res:
             CURRENT_TAB_ID = tab_res["tabId"]
             CURRENT_WINDOW_ID = tab_res.get("windowId", CURRENT_WINDOW_ID)
             audit(
                 "success",
                 message=f"Worker-Tab erstellt und gebunden: tabId={CURRENT_TAB_ID}, windowId={CURRENT_WINDOW_ID}",
-            )
-            checkpoint_ctx = step_context_advance(
-                checkpoint_ctx,
-                CHECKPOINT_PATH,
-                state="EXECUTE_TASK_LOOP"
-                if resume_checkpoint and resume_checkpoint.task_url
-                else "NAVIGATE_LOGIN",
-                step_index=gate.total_steps,
-                task_url=target_url,
-                no_progress_counter=gate.no_progress_count,
-                last_page_fingerprint=gate.last_screenshot_hash or "",
             )
         else:
             final_exit_reason = "tabs_create_missing_tab_id"
@@ -3327,15 +5347,6 @@ async def main():
                 reason=f"tabs_create hat keine tabId zurückgegeben: {tab_res}. "
                 "Kein Fallback auf aktiven Tab erlaubt.",
             )
-            checkpoint_ctx = step_context_advance(
-                checkpoint_ctx,
-                CHECKPOINT_PATH,
-                state="FAIL_SAFE",
-                step_index=gate.total_steps,
-                task_url=target_url,
-                no_progress_counter=gate.no_progress_count,
-                last_page_fingerprint=gate.last_screenshot_hash or "",
-            )
             await _finalize_worker_run(
                 run_summary, gate, final_exit_reason, final_page_state, recorder
             )
@@ -3344,15 +5355,6 @@ async def main():
         final_exit_reason = f"initial_navigation_failed: {e}"
         run_summary.bridge_errors += 1
         audit("stop", reason=f"Initiale Navigation fehlgeschlagen: {e}")
-        checkpoint_ctx = step_context_advance(
-            checkpoint_ctx,
-            CHECKPOINT_PATH,
-            state="FAIL_SAFE",
-            step_index=gate.total_steps,
-            task_url=target_url,
-            no_progress_counter=gate.no_progress_count,
-            last_page_fingerprint=gate.last_screenshot_hash or "",
-        )
         await _finalize_worker_run(run_summary, gate, final_exit_reason, final_page_state, recorder)
         return
 
@@ -3361,22 +5363,50 @@ async def main():
         final_exit_reason = "missing_current_tab_id_after_init"
         run_summary.bridge_errors += 1
         audit("stop", reason="CURRENT_TAB_ID ist nach Init immer noch None — Abbruch")
-        checkpoint_ctx = step_context_advance(
-            checkpoint_ctx,
-            CHECKPOINT_PATH,
-            state="FAIL_SAFE",
-            step_index=gate.total_steps,
-            task_url=target_url,
-            no_progress_counter=gate.no_progress_count,
-            last_page_fingerprint=gate.last_screenshot_hash or "",
-        )
         await _finalize_worker_run(run_summary, gate, final_exit_reason, final_page_state, recorder)
         return
 
     # Warten auf Seitenlade
     await human_delay(4.0, 6.0)
 
-    # Session direkt nach Laden sichern
+    # Cross-Run-Session wiederherstellen BEVOR wir uns einloggen.
+    # WHY: Der Cache enthaelt Cookies + LocalStorage der letzten Panel-Logins
+    # (HeyPiggy, PureSpectrum, Dynata, Sapio, Cint, Lucid). Wenn die noch
+    # gueltig sind, ueberspringen wir den kompletten Login-Flow beim naechsten
+    # Screen (wir sind automatisch angemeldet).
+    # CONSEQUENCES: Wir sparen pro Run 30-120 Sekunden + vermeiden dass Panels
+    # uns als "haeufige Neu-Logins" markieren (Trust-Score-Abwertung).
+    try:
+        # WHY: target_url kommt jetzt aus dem aktiven Platform-Profil damit der
+        # Worker fuer andere Anbieter (Prolific, Clickworker, Attapoll, ...) ohne
+        # Code-Aenderung nur per ENV umgeschaltet werden kann.
+        _profile = _active_platform()
+        restore_result = await _session_restore(
+            execute_bridge=execute_bridge,
+            tab_params=_tab_params(),
+            target_url=_profile.dashboard_url,
+            audit=audit,
+        )
+        if restore_result.get("restored"):
+            audit(
+                "session_restore_applied",
+                cookies_set=restore_result.get("cookies_set"),
+                storage_keys=restore_result.get("storage_keys"),
+                saved_at=restore_result.get("saved_at"),
+            )
+            # Reload damit die restaurierten Cookies/Storage greifen
+            try:
+                await execute_bridge(
+                    "execute_javascript",
+                    {"script": "location.reload();", **_tab_params()},
+                )
+                await human_delay(3.5, 5.0)
+            except Exception as re:
+                audit("session_restore_reload_error", error=str(re))
+    except Exception as e:
+        audit("session_restore_error", error=str(e))
+
+    # Session direkt nach Laden sichern (und persistenten Cache aktualisieren)
     await save_session("initial_load")
 
     # 5. VISION GATE LOOP — Das Herzstück
@@ -3392,7 +5422,6 @@ async def main():
 
         # ---- SCREENSHOT ----
         img_path, img_hash = await take_screenshot(current_step, label=action_desc[:20])
-        CURRENT_PAGE_FINGERPRINT = img_hash or CURRENT_PAGE_FINGERPRINT
         if not img_path:
             gate.record_step("RETRY", "", "unknown")
             run_summary.record_step(
@@ -3473,7 +5502,12 @@ async def main():
         # ---- SURVEY ABSCHLUSS-GARANTIE (NEU in v3.1) ----
         # Wenn page_state="survey_active" und Vision sagt STOP oder none:
         # → Survey läuft noch! Niemals abbrechen! Retry zwingend!
-        if page_state == "survey_active" and verdict in ("STOP", "none"):
+        if page_state in (
+            "survey_active",
+            "survey_audio",
+            "survey_video",
+            "survey_image",
+        ) and verdict in ("STOP", "none"):
             audit(
                 "warning",
                 message="SURVEY ABSCHLUSS-GARANTIE: survey_active aber Vision will stoppen → Ignoriert! Survey MUSS fertig werden!",
@@ -3490,15 +5524,6 @@ async def main():
             run_summary.vision_errors += 1
             audit("stop", reason=reason, page_state=page_state)
             await save_session("stop_state")
-            checkpoint_ctx = step_context_advance(
-                checkpoint_ctx,
-                CHECKPOINT_PATH,
-                state="FAIL_SAFE",
-                step_index=gate.total_steps,
-                task_url=before_url or checkpoint_ctx.task_url,
-                no_progress_counter=gate.no_progress_count,
-                last_page_fingerprint=img_hash or checkpoint_ctx.last_page_fingerprint,
-            )
             break
 
         # ---- RETRY ----
@@ -3520,6 +5545,47 @@ async def main():
             await save_session("completed")
             break
 
+        # ---- RATING-GUARD: survey_done darf NICHT gefeuert werden solange die
+        # Post-Survey-Bewertung offen ist. Panels wie CPX geben Bonus-Cent fuer
+        # das 5-Sterne+Freitext-Rating — ein "survey_done" VOR dem Submit-Klick
+        # laesst Geld liegen und der Orchestrator springt zu frueh weiter.
+        # WHY: Wir ueberschreiben page_state zurueck auf "survey_done" pending,
+        # und lassen den Loop noch einmal durchlaufen, damit die Aktionen aus
+        # dem Rating-Block (5 Sterne -> Textarea -> Submit) abgearbeitet werden.
+        global _RATING_SUBMITTED_FOR_CURRENT
+        if (
+            page_state == "survey_done"
+            and _LAST_RATING_PAGE is not None
+            and not _RATING_SUBMITTED_FOR_CURRENT
+        ):
+            audit(
+                "rating_guard_override",
+                note="survey_done uebergangen — Rating steht noch aus",
+                has_textarea=bool(_LAST_RATING_PAGE.get("textarea_ref")),
+                has_submit=bool(_LAST_RATING_PAGE.get("submit_ref")),
+            )
+            # Erzwinge dass der Agent weiter die Rating-Aktionen ausfuehrt.
+            # Wir setzen page_state auf survey_active damit der adaptive-delay
+            # und answer-recording-Pfad greift und kein "Umfrage zu Ende"
+            # Schnitt gemacht wird.
+            page_state = "survey_active"
+
+        # Merke ob in diesem Schritt der Submit-Klick auf der Rating-Seite war.
+        # WHY: Wenn der Agent gerade den Submit-Button der Rating-Seite
+        # gedrueckt hat (next_params.ref == submit_ref), markieren wir das
+        # Rating als erledigt — beim naechsten survey_done darf der Orchestrator
+        # dann sauber weiter.
+        if (
+            _LAST_RATING_PAGE is not None
+            and next_action in CLICK_ACTIONS
+            and isinstance(next_params, dict)
+        ):
+            submit_ref = str(_LAST_RATING_PAGE.get("submit_ref") or "").strip()
+            clicked_ref = str(next_params.get("ref") or "").strip()
+            if submit_ref and clicked_ref and submit_ref == clicked_ref:
+                _RATING_SUBMITTED_FOR_CURRENT = True
+                audit("rating_submitted", ref=submit_ref)
+
         # ---- SURVEY DONE — Bestätigungsseite erkannt ----
         # WHY: Wenn page_state="survey_done" bedeutet das, die aktuelle Umfrage wurde
         # erfolgreich abgeschlossen und eine Bestätigungsseite ist sichtbar.
@@ -3528,18 +5594,142 @@ async def main():
         # oder die Rückkehr zum Dashboard selbst erkennt und navigiert.
         # WARNUNG: Hier kein "break"! Abbrechen würde weitere ausstehende Surveys verpassen.
         if page_state == "survey_done":
-            run_summary.record_survey_completed()
+            # DQ-Erkennung: reason enthaelt "disqualif" ODER der letzte
+            # Screener-Trigger war positiv UND wir haben keinen EUR-Reward
+            # gesehen. Bei echten Completes erscheint immer ein Reward-Banner.
+            _reason_low = str(reason or decision.get("reason", "")).lower()
+            is_dq = (
+                "disqualif" in _reason_low
+                or "screen" in _reason_low and "out" in _reason_low
+                or "nicht teilnehmen" in _reason_low
+                or "kein passender" in _reason_low
+            )
+            # Quota-Full ist KEIN DQ — die Umfrage war ok, nur voll.
+            # WHY: Wuerden wir Quota-Full als DQ ins Brain schreiben, wuerden
+            # wir die URL morgen ueberspringen obwohl sie wieder offen sein
+            # koennte. Das kostet bares Geld.
+            if _QUOTA_FULL_DETECTED or "quote" in _reason_low or "quota" in _reason_low:
+                is_dq = False
+                audit("quota_bypass_dq", reason=_reason_low[:80])
+            if is_dq:
+                run_summary.record_survey_disqualified()
+                # Brain-Learning: Welche URL + Frage hat disqualifiziert?
+                # WHY: Der Agent soll morgen denselben Screener sofort
+                # erkennen und entweder eine andere Option probieren oder
+                # die Umfrage ueberspringen.
+                try:
+                    brain = globals().get("GLOBAL_BRAIN")
+                    if brain is not None and _LAST_QUESTION_TEXT:
+                        # Aktuelle URL aus Bridge holen (falls verfuegbar)
+                        cur_url = ""
+                        try:
+                            _u = await execute_bridge(
+                                "execute_javascript",
+                                {"script": "window.location.href;", **_tab_params()},
+                            )
+                            cur_url = str((_u or {}).get("result", ""))[:120]
+                        except Exception:
+                            cur_url = ""
+                        dq_key = f"{_LAST_QUESTION_TEXT[:80]}|{cur_url[:60]}"
+                        if dq_key not in _BRAIN_DQ_WRITTEN:
+                            _BRAIN_DQ_WRITTEN.add(dq_key)
+                            fact = (
+                                f"SCREENER-DISQUALIFIKATION: Frage '{_LAST_QUESTION_TEXT[:150]}' "
+                                f"auf URL '{cur_url or 'unknown'}' "
+                                f"fuehrte zu DQ. Reason: '{_reason_low[:120]}'. "
+                                "Bei kuenftigen Begegnungen andere Option probieren ODER "
+                                "die Umfrage ueberspringen."
+                            )
+                            await brain.ingest_fact(fact, scope="project")
+                            audit("brain_dq_learned", key=dq_key[:80])
+                except Exception as be:
+                    audit("brain_dq_error", error=str(be))
+            else:
+                run_summary.record_survey_completed()
             if recorder is not None:
                 recorder.clear()
             audit(
-                "success",
-                message="Umfrage vollständig abgeschlossen — Bestätigungsseite erkannt! Warte auf nächste Umfrage.",
+                "success" if not is_dq else "dq_recognized",
+                message=(
+                    "Umfrage vollstaendig abgeschlossen — Bestaetigungsseite erkannt!"
+                    if not is_dq
+                    else "Umfrage disqualifiziert — als DQ verbucht."
+                ),
                 page_state=page_state,
                 total_steps=gate.total_steps,
             )
             await save_session(f"survey_done_{gate.total_steps}")
-            # no_progress_count zurücksetzen — Abschluss ist echter Fortschritt
             gate.mark_dom_progress()
+
+            # ---- MULTI-SURVEY ORCHESTRATOR: nächste Umfrage holen ----
+            # WHY: Früher hat der Worker hier einfach `continue` gemacht und
+            # gehofft dass Vision selbstständig zur nächsten Umfrage navigiert.
+            # Das war unzuverlässig — jetzt übernimmt der Orchestrator explizit.
+            # CONSEQUENCES: Entweder (a) navigiert er zur nächsten Survey und der
+            # Loop läuft weiter, oder (b) die Queue ist leer → wir brechen sauber
+            # ab mit state=DONE.
+            if SURVEY_ORCHESTRATOR is not None:
+                try:
+                    queue_state = await SURVEY_ORCHESTRATOR.on_survey_completed(
+                        success=True,
+                        steps_used=gate.total_steps,
+                        end_reason="survey_done",
+                    )
+                except Exception as e:
+                    audit("orchestrator_error", error=str(e))
+                    queue_state = QueueState.ABORTED
+
+                if queue_state == QueueState.RUNNING:
+                    # BUDGET-GATE: Vor Beginn der NAECHSTEN Survey pruefen ob das
+                    # Token-/Request-/EUR-Budget erschoepft ist. Wenn ja: aktuelle
+                    # Survey war schon fertig, also sauber stoppen.
+                    # WHY: Wir wollen niemals mitten in einer Survey abbrechen
+                    # (das waere eine DQ und ruiniert die Trust-Scores). Der
+                    # Survey-Boundary ist der sichere Cut-Point.
+                    if BUDGET_GUARD is not None and BUDGET_GUARD.tripped():
+                        final_exit_reason = f"budget_tripped: {BUDGET_GUARD.trip_reason or 'limit_reached'}"
+                        audit(
+                            "budget_shutdown",
+                            reason=BUDGET_GUARD.trip_reason,
+                            tokens_used=BUDGET_GUARD.tokens_used,
+                            requests=BUDGET_GUARD.requests_used,
+                            eur_spent=round(BUDGET_GUARD.eur_spent, 4),
+                        )
+                        break
+                    # Neue Survey gestartet — gate-Limit + Rating-Flag zuruecksetzen
+                    # WHY: Wir wollen pro Survey MAX_STEPS, nicht global.
+                    # Der Rating-Flag muss fuer die neue Survey wieder False sein,
+                    # sonst ueberspringen wir deren Post-Survey-Bewertung.
+                    gate.reset_for_new_survey()
+                    _RATING_SUBMITTED_FOR_CURRENT = False
+                    # Loop/Spinner-Tracker fuer die neue Umfrage zuruecksetzen
+                    _RECENT_QUESTIONS.clear()
+                    _SAME_QUESTION_STREAK = 0
+                    _SPINNER_STREAK = 0
+                    # In-Survey Consistency-Memo + Quota-Flag zuruecksetzen
+                    _ANSWER_MEMO.clear()
+                    _QUOTA_FULL_DETECTED = False
+                    action_desc = "Neue Umfrage gestartet — beantworte Fragen"
+                    expected = "Erste Frage der neuen Umfrage ist sichtbar"
+                    await human_delay(2.5, 4.5)
+                    continue
+                elif queue_state in (
+                    QueueState.NO_MORE_AVAILABLE,
+                    QueueState.LIMIT_REACHED,
+                ):
+                    final_exit_reason = f"queue_finished: {queue_state.name.lower()}"
+                    audit(
+                        "queue_finished",
+                        state=queue_state.name,
+                        completed=SURVEY_ORCHESTRATOR.completed_count,
+                        attempted=SURVEY_ORCHESTRATOR.attempted_count,
+                    )
+                    break
+                else:
+                    final_exit_reason = f"queue_state_{queue_state.name.lower()}"
+                    audit("queue_unexpected_state", state=queue_state.name)
+                    break
+
             await human_delay(2.0, 4.0)
             continue
 
@@ -3560,7 +5750,6 @@ async def main():
 
         # URL und Title VOR der Aktion für DOM-Verifikation sammeln
         before_url, before_title = "", ""
-        before_dom_hash = ""
         try:
             pi_params = _tab_params()
             pi = await execute_bridge("get_page_info", pi_params)
@@ -3569,52 +5758,40 @@ async def main():
                 before_title = pi.get("title", "")
         except Exception:
             pass
-        try:
-            before_dom_hash = await _dom_text_hash()
-        except Exception:
-            before_dom_hash = ""
-        if before_dom_hash:
-            CURRENT_PAGE_FINGERPRINT = before_dom_hash
-        checkpoint_ctx = step_context_advance(
-            checkpoint_ctx,
-            CHECKPOINT_PATH,
-            state="EXECUTE_TASK_LOOP",
-            step_index=current_step,
-            task_url=before_url or target_url,
-            no_progress_counter=gate.no_progress_count,
-            last_page_fingerprint=img_hash or "",
-        )
-        selector_for_predicate = ""
-        x_for_predicate = None
-        y_for_predicate = None
-        if isinstance(next_params, dict):
-            selector_for_predicate = str(next_params.get("selector", ""))
-            raw_x = next_params.get("x")
-            raw_y = next_params.get("y")
-            x_for_predicate = raw_x if isinstance(raw_x, int) else None
-            y_for_predicate = raw_y if isinstance(raw_y, int) else None
-        if next_action in CLICK_ACTIONS or next_action == "type_text":
-            pre_check = await predicate_pre_check(
-                selector=selector_for_predicate,
-                x=x_for_predicate,
-                y=y_for_predicate,
-            )
-            if (
-                not pre_check.get("exists")
-                or not pre_check.get("visible")
-                or pre_check.get("occluded")
-            ):
-                audit(
-                    "predicate_pre_check",
-                    step=current_step,
-                    selector=selector_for_predicate,
-                    x=x_for_predicate,
-                    y=y_for_predicate,
-                    result=pre_check,
+
+        # ---- ADAPTIVE HUMAN THINK-TIME ----
+        # WHY: Panels messen die Antwort-Zeit pro Frage. Ein Bot der auf jede
+        # Frage nach 1.5s klickt ist sofort gebrandmarkt (speeder-penalty ->
+        # stille Disqualifikation ohne Reward). Wir passen die Pause an
+        # Komplexitaet der Frage + erkannte Trap-Art an.
+        # CONSEQUENCES: Nur bei Survey-States aktiv. Im Dashboard/Login/CAPTCHA
+        # laufen die bestehenden festen human_delay()-Aufrufe weiter.
+        if page_state in (
+            "survey_active",
+            "survey_audio",
+            "survey_video",
+            "survey_image",
+            "onboarding",
+        ) and next_action in CLICK_ACTIONS.union({"type_text", "select_option"}):
+            trap_hint = str(decision.get("trap_detected") or "none").strip() or "none"
+            if _LAST_SCREENER_HIT and trap_hint == "none":
+                trap_hint = "screening"
+            try:
+                d = await adaptive_think_delay(
+                    question_text=_LAST_QUESTION_TEXT,
+                    options=_LAST_QUESTION_OPTIONS,
+                    trap_detected=trap_hint,
+                    action_kind=next_action,
                 )
-                gate.record_step("RETRY", img_hash or "", final_page_state)
-                await human_delay(2.0, 4.0)
-                continue
+                audit(
+                    "think_delay",
+                    seconds=round(d, 2),
+                    trap=trap_hint,
+                    n_options=len(_LAST_QUESTION_OPTIONS or []),
+                    qlen=len(_LAST_QUESTION_TEXT or ""),
+                )
+            except Exception as e:
+                audit("think_delay_error", error=str(e))
 
         try:
             # Scroll-Aktionen
@@ -3633,9 +5810,126 @@ async def main():
                 selector = next_params.get("selector", "")
                 await keyboard_action(keys, selector=selector)
 
-            # Text-Eingabe — IMMER mit exaktem tabId
+            # Native <select>-Dropdown-Handler
+            # WHY: Bridge.click_ref auf ein <option> funktioniert bei echten
+            # HTML-<select>-Elementen oft NICHT zuverlaessig — der Browser
+            # setzt .value nicht, change-Event feuert nicht, das Formular
+            # bleibt invalid. Wir setzen deshalb direkt value + dispatch
+            # change/input via execute_javascript.
+            # CONSEQUENCES: Jede Auswahl in einem nativen <select> (Land,
+            # Bundesland, Bildung, Einkommen, Beruf) wird korrekt gesetzt.
+            # Custom-Dropdowns (div-basiert) laufen weiterhin ueber click_ref.
+            elif next_action == "select_option":
+                sel_params = {**next_params, **_tab_params()}
+                selector = sel_params.get("selector", "")
+                value = sel_params.get("value", "")
+                label = sel_params.get("label", "") or sel_params.get("text", "")
+                ref = sel_params.get("ref", "")
+                # Native-Select-Pfad wenn Selektor vorhanden und nicht ref-style
+                if selector and not selector.startswith("@"):
+                    sel_escaped = selector.replace("'", "\\'")
+                    val_escaped = str(value).replace("'", "\\'")
+                    lab_escaped = str(label).replace("'", "\\'")
+                    js = (
+                        "(function(){"
+                        f"var el=document.querySelector('{sel_escaped}');"
+                        "if(!el||el.tagName.toLowerCase()!=='select')return{ok:false,reason:'not_native_select'};"
+                        "var opts=Array.from(el.options);"
+                        "var picked=null;"
+                        f"var want_val='{val_escaped}'.toLowerCase();"
+                        f"var want_lab='{lab_escaped}'.toLowerCase();"
+                        "for(var i=0;i<opts.length;i++){"
+                        "  var o=opts[i];"
+                        "  var ov=(o.value||'').toLowerCase();"
+                        "  var ot=(o.text||'').toLowerCase();"
+                        "  if(want_val && ov===want_val){picked=o;break;}"
+                        "  if(want_lab && (ot===want_lab||ot.indexOf(want_lab)!==-1)){picked=o;break;}"
+                        "}"
+                        "if(!picked)return{ok:false,reason:'no_match',available:opts.slice(0,12).map(function(o){return o.text;})};"
+                        "el.value=picked.value;"
+                        "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                        "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                        "return{ok:true,chosen:picked.text,value:picked.value};"
+                        "})();"
+                    )
+                    try:
+                        r = await execute_bridge(
+                            "execute_javascript", {"script": js, **_tab_params()}
+                        )
+                        result = r.get("result") if isinstance(r, dict) else None
+                        if isinstance(result, dict) and result.get("ok"):
+                            audit(
+                                "native_select_set",
+                                selector=selector[:60],
+                                chosen=result.get("chosen"),
+                            )
+                        else:
+                            # Fallback: bridge's select_option
+                            audit(
+                                "native_select_fallback",
+                                selector=selector[:60],
+                                reason=result.get("reason") if isinstance(result, dict) else "unknown",
+                            )
+                            await execute_bridge("select_option", sel_params)
+                    except Exception as se:
+                        audit("native_select_error", error=str(se))
+                        await execute_bridge("select_option", sel_params)
+                elif ref:
+                    # Ref-basiert -> bridge's select_option
+                    await execute_bridge("select_option", sel_params)
+                else:
+                    await execute_bridge("select_option", sel_params)
+
+            # Text-Eingabe — IMMER mit exaktem tabId, MIT HUMAN-TYPING
+            # WHY: Bots tippen 200 Zeichen in 50ms -> Panels messen per-char
+            # Keystroke-Intervalle (keydown/keyup Delta) und markieren
+            # verdaechtig gleichmaessige Eingaben als Bot. Wir tippen
+            # zeichenweise mit 40-180ms Jitter + gelegentlichen Mikro-Pausen.
+            # CONSEQUENCES: Freitext-Antworten sehen menschlich aus,
+            # Bot-Fingerprinting wird umgangen.
             elif next_action == "type_text":
-                await execute_type_text_action(next_params)
+                params = {**next_params, **_tab_params()}
+                selector = params.get("selector", "")
+                text = params.get("text", "")
+                # Fokus setzen
+                if selector and (selector.startswith("@") or "@e" in selector):
+                    await execute_bridge("click_ref", {"ref": selector, **_tab_params()})
+                    await asyncio.sleep(0.4 + random.random() * 0.3)
+                elif selector:
+                    # Normaler CSS-Selektor: erst click dann tippen
+                    try:
+                        await execute_bridge("click", {"selector": selector, **_tab_params()})
+                        await asyncio.sleep(0.3 + random.random() * 0.3)
+                    except Exception:
+                        pass
+                # Human-cadence per-char
+                if text and len(text) <= 400:
+                    for idx, ch in enumerate(text):
+                        try:
+                            await execute_bridge(
+                                "keyboard", {"keys": [ch], **_tab_params()}
+                            )
+                        except Exception:
+                            # Fallback auf ganzes type_text falls keyboard-Einzelchar fehlschlaegt
+                            await execute_bridge("type_text", params)
+                            break
+                        # Jitter: 40-180ms, bei Satzzeichen leicht laenger, 3% Chance auf Mikro-Pause
+                        base = 0.04 + random.random() * 0.14
+                        if ch in ".,!?;:":
+                            base += 0.12 + random.random() * 0.18
+                        if ch == " " and random.random() < 0.05:
+                            base += 0.25 + random.random() * 0.35
+                        if random.random() < 0.03:
+                            base += 0.45 + random.random() * 0.6
+                        await asyncio.sleep(base)
+                    audit(
+                        "human_typed",
+                        chars=len(text),
+                        avg_ms_per_char=round(1000 * 0.1, 0),
+                    )
+                else:
+                    # Sehr lange Texte ODER leer -> single bridge call
+                    await execute_bridge("type_text", params)
 
             # Navigation — IMMER mit exaktem tabId, KEIN Fallback ohne tabId
             elif next_action == "navigate":
@@ -3648,11 +5942,6 @@ async def main():
                 params = {**next_params, **_tab_params()}
                 await execute_bridge(next_action, params)
 
-        except BridgeUnavailableError as e:
-            final_exit_reason = "bridge_unreachable_during_loop"
-            run_summary.bridge_errors += 1
-            audit("error", message=f"Bridge unreachable during action {next_action}: {e}")
-            break
         except Exception as e:
             audit(
                 "error",
@@ -3666,21 +5955,112 @@ async def main():
         # DOM-Verifikation prüft URL + Title — ändert sich irgendeins, war es echter Fortschritt.
         # KONSEQUENZ: mark_dom_progress() setzt no_progress_count zurück → kein vorzeitiger Abbruch.
 
-        # ---- ANSWER RECORDING — Antwort für Konsistenz speichern (NEU in v3.1) ----
-        if page_state == "survey_active" and next_action in CLICK_ACTIONS:
-            answer_desc = reason[:120] if reason else ""
-            if answer_desc:
-                record_answer(f"step_{gate.total_steps}_{next_action}", answer_desc)
-                audit(
-                    "answer_recorded",
-                    question=f"step_{gate.total_steps}",
-                    answer=answer_desc[:80],
-                )
+        # ---- ANSWER RECORDING — Antwort fuer Konsistenz speichern ----
+        # WHY: Drei-Stufen-Persistenz:
+        #   1) Legacy record_answer (bleibt fuer Rueckwaerts-Kompat.)
+        #   2) ANSWER_LOG (persona.AnswerLog JSONL) — wird im NAECHSTEN Prompt
+        #      als KONSISTENZ-TRAP-Block injiziert damit Trap-Detection greift.
+        #   3) GLOBAL_BRAIN.ingest_survey_answer — teilt den Fakt mit der
+        #      OpenSIN-Flotte damit andere Agenten dieselbe Persona konsistent
+        #      beantworten koennen (Maria, zweite Session, etc.).
+        # CONSEQUENCES: Wir nutzen question_text + answer_text aus der Vision-JSON
+        # falls verfuegbar, sonst Fallback auf DOM-Scan + reason.
+        if page_state in (
+            "survey_active",
+            "survey_audio",
+            "survey_video",
+            "survey_image",
+            "onboarding",
+        ) and next_action in CLICK_ACTIONS:
+            vision_question = str(decision.get("question_text") or "").strip()
+            vision_answer = str(decision.get("answer_text") or "").strip()
+            vision_topic = str(decision.get("question_topic") or "").strip() or None
+            trap_tag = str(decision.get("trap_detected") or "").strip() or "none"
+
+            # Fallback-Quellen fuer die Frage
+            question_final = (
+                vision_question
+                or (_LAST_QUESTION_TEXT or "").strip()
+                or f"step_{gate.total_steps}"
+            )
+            # Fallback-Quellen fuer die Antwort
+            answer_final = (
+                vision_answer
+                or (reason[:160] if reason else "")
+                or f"{next_action} {json.dumps(next_params, ensure_ascii=False)[:80]}"
+            )
+            # Topic ggf. aus der Frage ableiten (persona.detect_question_topic)
+            if not vision_topic and question_final:
+                try:
+                    vision_topic = detect_question_topic(question_final)
+                except Exception:
+                    vision_topic = None
+
+            # 1) Legacy record
+            record_answer(f"step_{gate.total_steps}_{next_action}", answer_final[:120])
+
+            # 1b) In-Survey Consistency Memo
+            # WHY: Scanner 20 (Answer-Consistency) liest _ANSWER_MEMO[hash(frage)]
+            # um Widerspruchs-Antworten zu verhindern. Wir speichern nach jedem
+            # erfolgreichen Click/Type.
+            if question_final and answer_final:
+                try:
+                    _norm = re.sub(r"\s+", " ", question_final.lower()).strip()
+                    _norm = re.sub(r"[.,;:!?\"'„“”‚‘’()\[\]]", "", _norm)
+                    _qh = hashlib.md5(_norm.encode("utf-8")).hexdigest()[:16]
+                    # Erste gegebene Antwort "gewinnt" — spaetere Duplikate muessen sich anpassen
+                    if _qh not in _ANSWER_MEMO:
+                        _ANSWER_MEMO[_qh] = answer_final[:200]
+                except Exception:
+                    pass
+
+            # 2) Persona Answer-Log (JSONL) fuer Konsistenz-Trap-Detection
+            if ANSWER_LOG is not None and question_final and answer_final:
+                try:
+                    ANSWER_LOG.record(
+                        question=question_final,
+                        answer=answer_final,
+                        topic=vision_topic,
+                        survey_id=(
+                            f"queue_{SURVEY_ORCHESTRATOR._current.index}"
+                            if SURVEY_ORCHESTRATOR is not None
+                            and SURVEY_ORCHESTRATOR._current is not None
+                            else None
+                        ),
+                        confidence="high" if vision_topic else "medium",
+                    )
+                except Exception as e:
+                    audit("answer_log_error", error=str(e))
+
+            # 3) Global Brain fuer Flotten-Wissen (non-fatal)
+            if GLOBAL_BRAIN is not None and question_final and answer_final:
+                try:
+                    await GLOBAL_BRAIN.ingest_survey_answer(
+                        question=question_final,
+                        answer=answer_final,
+                        topic=vision_topic,
+                        survey_id=(
+                            f"queue_{SURVEY_ORCHESTRATOR._current.index}"
+                            if SURVEY_ORCHESTRATOR is not None
+                            and SURVEY_ORCHESTRATOR._current is not None
+                            else None
+                        ),
+                    )
+                except Exception as e:
+                    audit("brain_ingest_error", error=str(e))
+
+            audit(
+                "answer_recorded",
+                step=gate.total_steps,
+                question=question_final[:120],
+                answer=answer_final[:120],
+                topic=vision_topic,
+                trap=trap_tag,
+            )
 
         await asyncio.sleep(get_fail_learning_dom_wait_seconds())
-        post_check = await predicate_post_check(before_dom_hash)
         dom_check = await dom_verify_change(before_url, before_title)
-        if post_check.get("changed") or dom_check.get("changed"):
+        if dom_check.get("changed"):
             # DOM hat sich verändert → echter Fortschritt → no_progress_count zurücksetzen
             gate.mark_dom_progress()
             audit(
@@ -3688,12 +6068,6 @@ async def main():
                 message="DOM-Verifikation: Seite hat sich nach Aktion erfolgreich verändert!",
             )
         else:
-            audit(
-                "no_progress",
-                step=current_step,
-                selector=selector_for_predicate,
-                dom_hash=before_dom_hash,
-            )
             audit(
                 "warning",
                 message="DOM-Verifikation: Keine Veränderung nach Aktion erkannt (Vision wird gleich prüfen).",
@@ -3709,67 +6083,61 @@ async def main():
     # Final Session sichern
     await save_session("final")
 
+    # Orchestrator abschließen — History-File schreiben und Stats sammeln
+    queue_stats: dict = {}
+    if SURVEY_ORCHESTRATOR is not None:
+        try:
+            queue_stats = SURVEY_ORCHESTRATOR.finalize()
+            audit("queue_finalized", **{k: v for k, v in queue_stats.items() if k != "records"})
+        except Exception as e:
+            audit("queue_finalize_error", error=str(e))
+
+    # Global Brain Session sauber beenden (non-fatal).
+    # WHY: Der OpenSIN-Daemon braucht ein endSession um die im Run konsultierten
+    # Rules als "verwendet" zu markieren und den Forgetting-Mechanismus zu
+    # fuettern. Ohne end_session bleiben Rules ewig hot.
+    if GLOBAL_BRAIN is not None:
+        try:
+            success_flag = bool(
+                queue_stats.get("completed", 0) > 0
+                or final_exit_reason in ("vision_done",)
+                or final_exit_reason.startswith("queue_finished")
+            )
+            await GLOBAL_BRAIN.end_session(
+                success=success_flag,
+                extra={
+                    "queue_attempted": queue_stats.get("attempted", 0),
+                    "queue_completed": queue_stats.get("completed", 0),
+                    "queue_failed": queue_stats.get("failed", 0),
+                    "exit_reason": final_exit_reason,
+                    "steps": gate.total_steps,
+                },
+            )
+        except Exception as e:
+            audit("brain_endsession_error", error=str(e))
+
     summary_path, fail_report_path, final_exit_reason = await _finalize_worker_run(
         run_summary, gate, final_exit_reason, final_page_state, recorder
     )
-    archived_dir = None
-    earnings = _extract_earnings_from_summary(summary_path)
-    if final_exit_reason in {"vision_done", "loop_finished"}:
-        checkpoint_ctx = step_context_advance(
-            checkpoint_ctx,
-            CHECKPOINT_PATH,
-            state=AgentState.COMPLETE,
-            step_index=gate.total_steps,
-            task_url=checkpoint_ctx.task_url,
-            no_progress_counter=gate.no_progress_count,
-            last_page_fingerprint=checkpoint_ctx.last_page_fingerprint,
-        )
-        clear_checkpoint(CHECKPOINT_PATH)
-        archived_dir = archive_run_bundle(ARTIFACT_DIR, RUN_ID, base_dir=ARTIFACT_BASE_DIR)
-        summary_path = archived_dir / "run_summary.json"
-        if fail_report_path is not None:
-            fail_report_path = archived_dir / "fail_replay" / fail_report_path.name
-    else:
-        checkpoint_ctx = step_context_advance(
-            checkpoint_ctx,
-            CHECKPOINT_PATH,
-            state=AgentState.EXECUTE_TASK_LOOP,
-            reason="preserve-before-terminal-handler",
-            step_index=gate.total_steps,
-            task_url=checkpoint_ctx.task_url,
-            no_progress_counter=gate.no_progress_count,
-            last_page_fingerprint=checkpoint_ctx.last_page_fingerprint,
-        )
-        if final_exit_reason == "limit_reached:max_retries":
-            escalate(
-                checkpoint_ctx,
-                CHECKPOINT_PATH,
-                ARTIFACT_DIR,
-                final_exit_reason,
-            )
-        else:
-            fail_safe(checkpoint_ctx, CHECKPOINT_PATH, final_exit_reason)
     run_summary.print_summary()
-    final_artifact_dir = archived_dir or ARTIFACT_DIR
-    recent_archives = list_recent_archives(ARTIFACT_BASE_DIR, limit=5)
 
     print(f"\n{'=' * 60}")
-    print(f"🏁 LAUF BEENDET — Zusammenfassung:")
+    print(f"LAUF BEENDET — Zusammenfassung:")
     print(f"   Schritte: {gate.total_steps}/{MAX_STEPS}")
     print(f"   Erfolgreich: {gate.successful_actions}")
     print(f"   Screenshots: {len(list(SCREENSHOT_DIR.glob('*.png')))}")
-    print(f"   Artefakte: {final_artifact_dir}")
+    print(f"   Artefakte: {ARTIFACT_DIR}")
     print(f"   Audit-Log: {AUDIT_LOG_PATH}")
     print(f"   Structured Summary: {summary_path}")
     if fail_report_path is not None:
         print(f"   Fail Replay Report: {fail_report_path}")
-    if archived_dir is not None:
-        print(f"   \033[92mEarnings: ${earnings:.2f}\033[0m")
-        print("   Letzte 5 abgeschlossenen Runs:")
-        for archived_run in recent_archives:
-            print(
-                f"     - {archived_run.run_id} | ${archived_run.earnings:.2f} | {archived_run.duration_seconds:.1f}s"
-            )
+    if queue_stats:
+        print(f"\n   MULTI-SURVEY QUEUE:")
+        print(f"   Surveys versucht: {queue_stats.get('attempted', 0)}")
+        print(f"   Surveys abgeschlossen: {queue_stats.get('completed', 0)}")
+        print(f"   Surveys fehlgeschlagen: {queue_stats.get('failed', 0)}")
+        print(f"   Gesamt-Dauer: {queue_stats.get('total_duration_sec', 0)}s")
+        print(f"   Queue-Status: {queue_stats.get('state', '?')}")
     print(f"{'=' * 60}\n")
 
 

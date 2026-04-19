@@ -1,0 +1,61 @@
+{
+  "_comment": "Beispiel-Profil fuer Jeremy Schulze. BITTE SENSIBLE FELDER NUR LOKAL AUSFUELLEN und NIEMALS ins Git-Repo commiten. Ein Eintrag in .gitignore sollte diese Datei pro Installation schuetzen.",
+
+  "username": "jeremy_schulze",
+  "full_name": "Jeremy Schulze",
+  "first_name": "Jeremy",
+  "last_name": "Schulze",
+  "date_of_birth": "",
+  "gender": "male",
+  "email": "",
+  "phone": "",
+
+  "country": "DE",
+  "country_name": "Deutschland",
+  "region": "",
+  "city": "",
+  "postal_code": "",
+  "language_primary": "de",
+  "languages_spoken": ["de", "en"],
+
+  "marital_status": "",
+  "household_size": 0,
+  "children_count": 0,
+  "children_ages": [],
+  "pets": [],
+
+  "employment_status": "",
+  "occupation": "",
+  "industry": "",
+  "work_hours_per_week": 0,
+  "education_level": "",
+
+  "income_monthly_net_eur": 0,
+  "income_monthly_gross_eur": 0,
+  "income_yearly_gross_eur": 0,
+  "household_income_monthly_eur": 0,
+
+  "housing_type": "",
+  "rooms_in_dwelling": 0,
+  "car_ownership": "",
+  "cars_in_household": 0,
+
+  "smoking": "",
+  "alcohol_consumption": "",
+  "sports_per_week_hours": 0,
+
+  "hobbies": [],
+  "interests": [],
+  "shopping_habits": {},
+  "brand_preferences": {},
+  "social_media_platforms": [],
+  "streaming_services": [],
+  "news_sources": [],
+
+  "political_leaning": "",
+  "religion": "",
+  "sexual_orientation": "",
+  "health_conditions": [],
+
+  "extra_facts": {}
+}

@@ -6,8 +6,8 @@
 # -----------------------------------------------------------------------------
 
 .PHONY: help install install-dev lint format typecheck test test-cov \
-        security audit secrets pre-commit clean run docker-build docker-run \
-        ci all
+        security audit secrets pre-commit clean run run-legacy doctor dry-run \
+        docker-build docker-run fresh ci all
 
 PYTHON ?= python3
 PIP    ?= $(PYTHON) -m pip
@@ -77,6 +77,12 @@ run: ## Run the worker via the new CLI entrypoint.
 run-legacy: ## Run the worker via the backward-compat shim.
 	$(PYTHON) heypiggy_vision_worker.py
 
+doctor: ## Run the CLI health check.
+	heypiggy-worker doctor
+
+dry-run: ## Validate config + preflight only, no bridge.
+	heypiggy-worker run --dry-run
+
 # --- Docker ----------------------------------------------------------------
 
 docker-build: ## Build the production Docker image.
@@ -90,3 +96,5 @@ docker-run: ## Run the Docker image with env vars from .env.
 clean: ## Remove caches and build artifacts.
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage .coverage_html coverage.xml build dist *.egg-info
+
+fresh: clean install-dev ## Clean slate: wipe caches then reinstall everything.

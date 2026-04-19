@@ -35,13 +35,16 @@ class BridgeConfig:
 @dataclass(frozen=True)
 class VisionConfig:
     """
-    Vision-Model-Konfiguration.
-    WHY: Vision-Model, Timeouts und Retry-Limits müssen zentral steuerbar sein.
-         Verschiedene Modelle haben verschiedene Timeout-Anforderungen.
-    CONSEQUENCES: Ein Ort für alle Vision-Parameter. ENV-Overrides möglich.
+    Vision-Model-Konfiguration (Legacy-Switch).
+    WHY: `model` ist nur relevant falls VISION_BACKEND auf einen externen
+         Vision-CLI-Provider gesetzt wird. Der Default-Laufzeit-Pfad ist
+         VISION_BACKEND="auto" -> nimmt NVIDIA NIM mit NvidiaConfig.primary_model
+         (meta/llama-3.2-11b-vision-instruct). Dieses Feld bleibt nur fuer
+         experimentelle Provider-Switches bestehen.
+    CONSEQUENCES: Wer NVIDIA nutzt (Default!), muss dieses Feld ignorieren.
     """
 
-    model: str = "google/antigravity-gemini-3-flash"
+    model: str = "nvidia/meta/llama-3.2-11b-vision-instruct"
     max_steps: int = 120
     max_retries: int = 5
     max_no_progress: int = 15
@@ -67,6 +70,75 @@ class NvidiaConfig:
     )
     timeout: int = 120
     max_inline_bytes: int = 150_000
+
+
+@dataclass(frozen=True)
+class MediaConfig:
+    """
+    Multi-Modal Media-Pipeline Konfiguration (Audio / Video / Bilder).
+    WHY: Umfragen enthalten häufig <audio>/<video>/<img>-Fragen. Wir müssen
+         steuern welche NVIDIA NIM Modelle für ASR und Video-Understanding
+         genutzt werden, und welche Timeouts / Frame-Counts sinnvoll sind.
+    CONSEQUENCES: Eine Instanz pro Worker-Run; ENV-überschreibbar.
+    """
+
+    audio_model: str = "nvidia/parakeet-tdt-0.6b-v2"
+    audio_fallback_models: tuple[str, ...] = (
+        "nvidia/canary-1b-flash",
+        "nvidia/parakeet-ctc-1.1b",
+    )
+    video_model: str = "nvidia/cosmos-reason1-7b"
+    video_fallback_models: tuple[str, ...] = (
+        "nvidia/vita-1.5",
+        "meta/llama-3.2-90b-vision-instruct",
+    )
+    audio_timeout: int = 90
+    video_timeout: int = 180
+    video_frame_count: int = 8
+    language_hint: str = "de"
+    enabled: bool = True
+    max_audio_bytes: int = 20_000_000
+    max_video_bytes: int = 80_000_000
+
+
+@dataclass(frozen=True)
+class QueueConfig:
+    """
+    Multi-Survey Queue Konfiguration.
+    WHY: Der Worker soll beliebig viele Surveys am Stück erledigen können.
+         Cooldown + max_surveys verhindern Account-Flags und Endlos-Loops.
+    """
+
+    dashboard_url: str = "https://www.heypiggy.com/"
+    max_surveys: int = 25
+    cooldown_sec: float = 4.0
+    cooldown_jitter_sec: float = 2.0
+    autodetect: bool = True
+    explicit_urls: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PersonaConfig:
+    """
+    Persona + Global-Brain-Konfiguration — Wahrheits-Backbone des Workers.
+
+    WHY: Der Worker darf niemals lügen. Die Persona-Datei bestimmt welche
+    Person er repräsentiert, das Answer-Log garantiert Konsistenz über
+    Validation-Traps hinweg, und das OpenSIN Global Brain teilt Erkenntnisse
+    mit anderen Agenten der Flotte.
+    """
+
+    username: str = ""  # leer = keine Persona, Worker läuft legacy
+    profiles_dir: str = "profiles"
+    answer_log_path: str = "artifacts/answer_history.jsonl"
+    similarity_threshold: float = 0.78
+    enabled: bool = True
+    # Global Brain (OpenSIN)
+    brain_url: str = "http://127.0.0.1:7070"
+    brain_project_id: str = "heypiggy-survey-worker"
+    brain_agent_id: str = "a2a-sin-worker-heypiggy"
+    brain_enabled: bool = True
+    brain_timeout_sec: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -134,6 +206,9 @@ class WorkerConfig:
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     nvidia: NvidiaConfig = field(default_factory=NvidiaConfig)
+    media: MediaConfig = field(default_factory=MediaConfig)
+    queue: QueueConfig = field(default_factory=QueueConfig)
+    persona: PersonaConfig = field(default_factory=PersonaConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     artifacts: ArtifactConfig = field(default_factory=ArtifactConfig)
 
@@ -159,6 +234,27 @@ def load_config_from_env() -> WorkerConfig:
     if fallback_models_env.strip():
         fallback_models = tuple(
             model.strip() for model in fallback_models_env.split(",") if model.strip()
+        )
+
+    audio_fallback_env = os.environ.get("AUDIO_ASR_FALLBACK_MODELS", "")
+    audio_fallback = MediaConfig.audio_fallback_models
+    if audio_fallback_env.strip():
+        audio_fallback = tuple(
+            m.strip() for m in audio_fallback_env.split(",") if m.strip()
+        )
+
+    video_fallback_env = os.environ.get("VIDEO_UNDERSTANDING_FALLBACK_MODELS", "")
+    video_fallback = MediaConfig.video_fallback_models
+    if video_fallback_env.strip():
+        video_fallback = tuple(
+            m.strip() for m in video_fallback_env.split(",") if m.strip()
+        )
+
+    explicit_urls_env = os.environ.get("HEYPIGGY_SURVEY_URLS", "")
+    explicit_urls: tuple[str, ...] = ()
+    if explicit_urls_env.strip():
+        explicit_urls = tuple(
+            u.strip() for u in explicit_urls_env.split(",") if u.strip()
         )
 
     return WorkerConfig(
@@ -187,6 +283,63 @@ def load_config_from_env() -> WorkerConfig:
             timeout=int(os.environ.get("NVIDIA_TIMEOUT", NvidiaConfig.timeout)),
             max_inline_bytes=int(
                 os.environ.get("NVIDIA_MAX_INLINE_BYTES", NvidiaConfig.max_inline_bytes)
+            ),
+        ),
+        media=MediaConfig(
+            audio_model=os.environ.get("AUDIO_ASR_MODEL", MediaConfig.audio_model),
+            audio_fallback_models=audio_fallback,
+            video_model=os.environ.get("VIDEO_UNDERSTANDING_MODEL", MediaConfig.video_model),
+            video_fallback_models=video_fallback,
+            audio_timeout=int(os.environ.get("AUDIO_ASR_TIMEOUT", MediaConfig.audio_timeout)),
+            video_timeout=int(
+                os.environ.get("VIDEO_UNDERSTANDING_TIMEOUT", MediaConfig.video_timeout)
+            ),
+            video_frame_count=int(
+                os.environ.get("VIDEO_FRAME_COUNT", MediaConfig.video_frame_count)
+            ),
+            language_hint=os.environ.get("MEDIA_LANGUAGE", MediaConfig.language_hint),
+            enabled=os.environ.get("MEDIA_PIPELINE_ENABLED", "1") != "0",
+            max_audio_bytes=int(
+                os.environ.get("MEDIA_MAX_AUDIO_BYTES", MediaConfig.max_audio_bytes)
+            ),
+            max_video_bytes=int(
+                os.environ.get("MEDIA_MAX_VIDEO_BYTES", MediaConfig.max_video_bytes)
+            ),
+        ),
+        queue=QueueConfig(
+            dashboard_url=os.environ.get("HEYPIGGY_DASHBOARD_URL", QueueConfig.dashboard_url),
+            max_surveys=int(os.environ.get("HEYPIGGY_MAX_SURVEYS", QueueConfig.max_surveys)),
+            cooldown_sec=float(
+                os.environ.get("HEYPIGGY_COOLDOWN_SEC", QueueConfig.cooldown_sec)
+            ),
+            cooldown_jitter_sec=float(
+                os.environ.get("HEYPIGGY_COOLDOWN_JITTER", QueueConfig.cooldown_jitter_sec)
+            ),
+            autodetect=os.environ.get("HEYPIGGY_AUTODETECT", "1") != "0",
+            explicit_urls=explicit_urls,
+        ),
+        persona=PersonaConfig(
+            username=os.environ.get("HEYPIGGY_PERSONA", PersonaConfig.username),
+            profiles_dir=os.environ.get("HEYPIGGY_PROFILES_DIR", PersonaConfig.profiles_dir),
+            answer_log_path=os.environ.get(
+                "HEYPIGGY_ANSWER_LOG", PersonaConfig.answer_log_path
+            ),
+            similarity_threshold=float(
+                os.environ.get(
+                    "HEYPIGGY_ANSWER_SIMILARITY", PersonaConfig.similarity_threshold
+                )
+            ),
+            enabled=os.environ.get("HEYPIGGY_PERSONA_ENABLED", "1") != "0",
+            brain_url=os.environ.get("BRAIN_URL", PersonaConfig.brain_url),
+            brain_project_id=os.environ.get(
+                "BRAIN_PROJECT_ID", PersonaConfig.brain_project_id
+            ),
+            brain_agent_id=os.environ.get(
+                "BRAIN_AGENT_ID", PersonaConfig.brain_agent_id
+            ),
+            brain_enabled=os.environ.get("BRAIN_ENABLED", "1") != "0",
+            brain_timeout_sec=float(
+                os.environ.get("BRAIN_TIMEOUT_SEC", PersonaConfig.brain_timeout_sec)
             ),
         ),
         recorder=RecorderConfig(

@@ -34,7 +34,9 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
         execute_bridge = AsyncMock()
         check_bridge_alive = AsyncMock(return_value=True)
         run_vision_model = AsyncMock(
-            side_effect=AssertionError("vision probe must not run when credentials are missing")
+            side_effect=AssertionError(
+                "vision probe must not run when credentials are missing"
+            )
         )
 
         with (
@@ -130,7 +132,9 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         ):
-            decision = await worker.ask_vision("/tmp/probe.png", "action", "expected", 1)
+            decision = await worker.ask_vision(
+                "/tmp/probe.png", "action", "expected", 1
+            )
 
         self.assertEqual(decision["verdict"], "STOP")
         self.assertEqual(decision["page_state"], "error")
@@ -172,7 +176,9 @@ class HeyPiggyWorkerVisionTimeoutTests(unittest.IsolatedAsyncioTestCase):
         timeout = 180
         cli_timeout = max(30, timeout - 5)
         self.assertEqual(cli_timeout, 175)
-        self.assertGreater(cli_timeout, 60, "CLI-Timeout muss groß genug für Gemini sein")
+        self.assertGreater(
+            cli_timeout, 60, "CLI-Timeout muss gross genug fuer das Vision-LLM sein"
+        )
 
 
 class HeyPiggyWorkerControllerTests(unittest.TestCase):
@@ -230,80 +236,6 @@ class HeyPiggyWorkerJsonParsingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["verdict"], "PROCEED")
         self.assertEqual(decision["page_state"], "dashboard")
         self.assertEqual(decision["next_action"], "click_element")
-
-    def test_parse_vision_response_accepts_valid_json_schema(self):
-        parsed = worker.parse_vision_response(
-            json.dumps(
-                {
-                    "verdict": "PROCEED",
-                    "page_state": "dashboard",
-                    "reason": "ok",
-                    "progress": True,
-                    "next_action": "click_element",
-                    "next_params": {"selector": "#btn"},
-                }
-            )
-        )
-
-        self.assertEqual(parsed["verdict"], "PROCEED")
-        self.assertEqual(parsed["page_state"], "dashboard")
-
-    def test_parse_vision_response_extracts_verdict_from_plain_text(self):
-        parsed = worker.parse_vision_response("Model says RETRY because page is still loading")
-
-        self.assertEqual(parsed["verdict"], "RETRY")
-        self.assertEqual(parsed["next_action"], "none")
-
-    def test_parse_vision_response_returns_retry_for_invalid_schema(self):
-        parsed = worker.parse_vision_response(
-            json.dumps(
-                {
-                    "verdict": "MAYBE",
-                    "page_state": "dashboard",
-                    "reason": "bad verdict",
-                    "progress": True,
-                    "next_action": "click_element",
-                    "next_params": {},
-                }
-            )
-        )
-
-        self.assertEqual(parsed["verdict"], "RETRY")
-
-    async def test_predicate_pre_check_reports_visible_clickable_element(self):
-        with (
-            patch.object(
-                worker,
-                "execute_bridge",
-                AsyncMock(
-                    return_value={
-                        "result": {
-                            "exists": True,
-                            "visible": True,
-                            "clickable": True,
-                            "occluded": False,
-                        }
-                    }
-                ),
-            ),
-            patch.object(worker, "CURRENT_TAB_ID", 101),
-        ):
-            result = await worker.predicate_pre_check(selector="#btn")
-
-        self.assertTrue(result["exists"])
-        self.assertTrue(result["visible"])
-        self.assertFalse(result["occluded"])
-
-    async def test_predicate_post_check_detects_dom_change(self):
-        with patch.object(
-            worker,
-            "_dom_text_hash",
-            AsyncMock(return_value="newhash"),
-        ):
-            result = await worker.predicate_post_check("oldhash")
-
-        self.assertTrue(result["changed"])
-        self.assertEqual(result["new_hash"], "newhash")
 
     async def test_ask_vision_includes_fail_learning_context_in_prompt(self):
         fake_runner = AsyncMock(
@@ -426,7 +358,9 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(worker, "NVIDIA_API_KEY", "nvapi-test"),
-            patch("asyncio.to_thread", new=AsyncMock(return_value=(429, "", "rate limit"))),
+            patch(
+                "asyncio.to_thread", new=AsyncMock(return_value=(429, "", "rate limit"))
+            ),
         ):
             result = await worker._nvidia_nim_chat(
                 "test",
@@ -483,7 +417,9 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
             patch.object(worker, "_run_vision_nvidia", fake_nvidia),
             patch.object(worker, "_run_vision_opencode", fake_opencode),
         ):
-            result = await worker.run_vision_model("prompt", "/tmp/x.png", timeout=30, step_num=1)
+            result = await worker.run_vision_model(
+                "prompt", "/tmp/x.png", timeout=30, step_num=1
+            )
         self.assertTrue(result["ok"])
         fake_nvidia.assert_awaited_once()
         fake_opencode.assert_not_called()
@@ -500,7 +436,9 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
             patch.object(worker, "_run_vision_nvidia", fake_nvidia),
             patch.object(worker, "_run_vision_opencode", fake_opencode),
         ):
-            result = await worker.run_vision_model("prompt", "/tmp/x.png", timeout=30, step_num=1)
+            result = await worker.run_vision_model(
+                "prompt", "/tmp/x.png", timeout=30, step_num=1
+            )
         self.assertEqual(result["text"], "opencode-worked")
         fake_opencode.assert_awaited_once()
         fake_nvidia.assert_not_called()
@@ -516,7 +454,9 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
             patch.object(worker, "_run_vision_nvidia", fake_nvidia),
             patch.object(worker, "_run_vision_opencode", fake_opencode),
         ):
-            result = await worker.run_vision_model("prompt", "/tmp/x.png", timeout=30, step_num=1)
+            result = await worker.run_vision_model(
+                "prompt", "/tmp/x.png", timeout=30, step_num=1
+            )
 
         self.assertEqual(result["text"], "opencode-worked")
         fake_opencode.assert_awaited_once()
@@ -567,7 +507,9 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
         self.assertEqual(cached["verdict"], "PROCEED")
 
     def test_cache_rejects_retry_verdicts(self):
-        worker._vision_cache_put("hash123", "desc", 1, {"verdict": "RETRY", "reason": "blur"})
+        worker._vision_cache_put(
+            "hash123", "desc", 1, {"verdict": "RETRY", "reason": "blur"}
+        )
         self.assertIsNone(worker._vision_cache_get("hash123", "desc", 2))
 
     def test_cache_ignores_missing_hash(self):
@@ -740,7 +682,9 @@ class HeyPiggyProfileAutofillTests(unittest.TestCase):
         self.assertEqual(out["text"], "jeremy@example.com")
 
     def test_profile_placeholder_resolves_from_profile(self):
-        with patch.object(worker, "USER_PROFILE", {"name": "Jeremy Schulze", "city": "Berlin"}):
+        with patch.object(
+            worker, "USER_PROFILE", {"name": "Jeremy Schulze", "city": "Berlin"}
+        ):
             params = {"selector": "#name", "text": "<NAME>"}
             out = worker.inject_credentials(params, "", "")
         self.assertEqual(out["text"], "Jeremy Schulze")
@@ -761,76 +705,14 @@ class HeyPiggyProfileAutofillTests(unittest.TestCase):
 
     def test_resolve_profile_value_for_vorname(self):
         with patch.object(worker, "USER_PROFILE", {"first_name": "Jeremy"}):
-            self.assertEqual(worker._resolve_profile_value("first-name-input"), "Jeremy")
+            self.assertEqual(
+                worker._resolve_profile_value("first-name-input"), "Jeremy"
+            )
             self.assertEqual(worker._resolve_profile_value("vorname"), "Jeremy")
 
     def test_resolve_profile_value_returns_none_on_mismatch(self):
         with patch.object(worker, "USER_PROFILE", {"city": "Berlin"}):
             self.assertIsNone(worker._resolve_profile_value("some-random-field"))
-
-
-class HeyPiggyAccessibilityRefTests(unittest.IsolatedAsyncioTestCase):
-    def test_extract_accessibility_ref_returns_clean_ref_from_labelled_text(self):
-        self.assertEqual(worker.extract_accessibility_ref("textbox @e19"), "@e19")
-        self.assertEqual(worker.extract_accessibility_ref("radio option @e7"), "@e7")
-
-    def test_extract_accessibility_ref_returns_empty_when_missing(self):
-        self.assertEqual(worker.extract_accessibility_ref("#email"), "")
-        self.assertEqual(worker.extract_accessibility_ref(""), "")
-
-    async def test_execute_type_text_action_uses_clean_ref_and_keyboard_for_accessibility_selector(
-        self,
-    ):
-        fake_bridge = AsyncMock(return_value={"ok": True})
-        fake_keyboard = AsyncMock()
-
-        with (
-            patch.object(worker, "CURRENT_TAB_ID", 101),
-            patch.object(worker, "execute_bridge", fake_bridge),
-            patch.object(worker, "keyboard_action", fake_keyboard),
-            patch("asyncio.sleep", new=AsyncMock()),
-        ):
-            await worker.execute_type_text_action({"selector": "textbox @e19", "text": "hello"})
-
-        self.assertEqual(fake_bridge.await_count, 1)
-        self.assertEqual(fake_bridge.await_args.args[0], "click_ref")
-        self.assertEqual(fake_bridge.await_args.args[1]["ref"], "@e19")
-        fake_keyboard.assert_awaited_once_with(list("hello"))
-
-    async def test_execute_type_text_action_uses_explicit_ref_when_present(self):
-        fake_bridge = AsyncMock(return_value={"ok": True})
-        fake_keyboard = AsyncMock()
-
-        with (
-            patch.object(worker, "CURRENT_TAB_ID", 101),
-            patch.object(worker, "execute_bridge", fake_bridge),
-            patch.object(worker, "keyboard_action", fake_keyboard),
-            patch("asyncio.sleep", new=AsyncMock()),
-        ):
-            await worker.execute_type_text_action(
-                {"selector": "textbox @e19", "ref": "field @e22", "text": "abc"}
-            )
-
-        self.assertEqual(fake_bridge.await_args.args[1]["ref"], "@e22")
-        fake_keyboard.assert_awaited_once_with(list("abc"))
-
-    async def test_execute_type_text_action_falls_back_to_type_text_for_css_selector(
-        self,
-    ):
-        fake_bridge = AsyncMock(return_value={"ok": True})
-        fake_keyboard = AsyncMock()
-
-        with (
-            patch.object(worker, "CURRENT_TAB_ID", 101),
-            patch.object(worker, "execute_bridge", fake_bridge),
-            patch.object(worker, "keyboard_action", fake_keyboard),
-        ):
-            await worker.execute_type_text_action({"selector": ".email-input", "text": "hello"})
-
-        self.assertEqual(fake_bridge.await_count, 1)
-        self.assertEqual(fake_bridge.await_args.args[0], "type_text")
-        self.assertEqual(fake_bridge.await_args.args[1]["selector"], ".email-input")
-        fake_keyboard.assert_not_called()
 
 
 class HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -868,7 +750,9 @@ class HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "save_fail_report_to_disk",
                 return_value=pathlib.Path("/tmp/fail_report.md"),
             ) as save_report,
-            patch.object(worker, "post_github_issue_comment", return_value=True) as post_comment,
+            patch.object(
+                worker, "post_github_issue_comment", return_value=True
+            ) as post_comment,
             patch.dict(
                 os.environ,
                 {
@@ -926,7 +810,9 @@ class HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ),
-                patch.object(worker, "generate_fail_report_markdown", return_value="report-body"),
+                patch.object(
+                    worker, "generate_fail_report_markdown", return_value="report-body"
+                ),
                 patch.object(
                     worker,
                     "save_fail_report_to_disk",
@@ -1192,7 +1078,9 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         ):
             worker.apply_fail_learning_to_decision(decision, gate, "hash-loop")
             worker.apply_fail_learning_to_decision(decision, gate, "hash-loop")
-            adapted = worker.apply_fail_learning_to_decision(decision, gate, "hash-loop")
+            adapted = worker.apply_fail_learning_to_decision(
+                decision, gate, "hash-loop"
+            )
 
         self.assertEqual(adapted["verdict"], "RETRY")
         self.assertEqual(adapted["next_action"], "none")

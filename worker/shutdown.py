@@ -109,7 +109,11 @@ class ShutdownController:
     # ----------------------------------------------------------- internals
 
     def _install_handlers(self) -> None:
-        assert self._loop is not None
+        if self._loop is None:
+            # Defensive: should be unreachable because __aenter__ sets it
+            # first. Kept as a real error (not `assert`) so it survives
+            # running under ``python -O``.
+            raise RuntimeError("ShutdownController._install_handlers called before __aenter__")
         for sig in _HANDLED_SIGNALS:
             try:
                 self._loop.add_signal_handler(sig, self._on_signal, sig)
@@ -120,7 +124,8 @@ class ShutdownController:
                 signal.signal(sig, self._on_signal_sync)
 
     def _restore_handlers(self) -> None:
-        assert self._loop is not None
+        if self._loop is None:
+            return  # nothing was ever installed
         for sig in _HANDLED_SIGNALS:
             with contextlib.suppress(NotImplementedError, ValueError):
                 self._loop.remove_signal_handler(sig)

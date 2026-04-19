@@ -39,20 +39,28 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install runtime dependencies into an isolated prefix so the runtime stage
-# can copy just the site-packages without build tooling.
+# can copy just the site-packages without build tooling. We install *with*
+# dependency resolution — the earlier `--no-deps || fallback` pattern
+# masked real install errors, so we fail loudly instead.
 COPY requirements.txt ./
-RUN pip install --prefix=/install --no-deps --require-hashes=false \
-        -r requirements.txt \
-    || pip install --prefix=/install -r requirements.txt
+RUN pip install --prefix=/install -r requirements.txt
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime
 # -----------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
+# OCI image labels — visible in `docker inspect` and registries.
+LABEL org.opencontainers.image.title="heypiggy-vision-worker" \
+      org.opencontainers.image.description="Autonomous HeyPiggy survey worker for the A2A-SIN platform" \
+      org.opencontainers.image.source="https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="OpenSIN-AI"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
+    PYTHONHASHSEED=random \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HEYPIGGY_LOG_FORMAT=json
 

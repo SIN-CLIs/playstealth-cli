@@ -1,0 +1,6 @@
+# Sensible Persona-Daten niemals einchecken.
+# Das Template _template.json und leere Stubs (jeremy_schulze.json) duerfen
+# committed werden; alle befuellten Profile bleiben lokal.
+*.json
+!_template.json
+!jeremy_schulze.json

@@ -24,7 +24,7 @@ class WorkerConfigTests(unittest.TestCase):
         self.assertEqual(
             cfg.bridge.mcp_url, "https://openjerro-opensin-bridge-mcp.hf.space/mcp"
         )
-        self.assertEqual(cfg.vision.model, "google/antigravity-gemini-3-flash")
+        self.assertEqual(cfg.vision.model, "nvidia/meta/llama-3.2-11b-vision-instruct")
         self.assertEqual(
             cfg.nvidia.primary_model, "nvidia/meta/llama-3.2-11b-vision-instruct"
         )
