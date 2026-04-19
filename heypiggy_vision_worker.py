@@ -5492,6 +5492,9 @@ async def main():
     # CONSEQUENCES: Dieses JS wird einmalig nach Tab-Create injiziert und
     #               maskiert die häufigsten Browser-Fingerprint-Vektoren.
     #               Es darf NIEMALS Fehler werfen (try/catch um alles).
+    #
+    # GOTCHA: Falls der Worker Umfragen öffnet aber sofort DQ (Disqualified)
+    #         bekommt, ist oft der Stealth-Layer kompromittiert oder veraltet.
     # =========================================================================
     try:
         stealth_js = """

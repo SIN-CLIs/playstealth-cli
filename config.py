@@ -25,6 +25,19 @@ class BridgeConfig:
     WHY: Bridge-URLs ändern sich zwischen Dev/Prod/Test.
          Frozen dataclass verhindert versehentliche Mutation zur Laufzeit.
     CONSEQUENCES: Zentral konfiguriert, ENV-überschreibbar, typsicher.
+
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ACHTUNG — KRITISCHE FALLE (2026-04-19 dokumentiert):
+    Die Bridge läuft auf HuggingFace Spaces, NICHT lokal!
+    NIEMALS `BRIDGE_MCP_URL="http://127.0.0.1:7777"` setzen!
+    → Das erzeugt `Connection refused` und der Worker startet nicht.
+    Die Chrome-Extension verbindet sich per WebSocket zu:
+      wss://openjerro-opensin-bridge-mcp.hf.space/extension
+    Der Worker verbindet sich per HTTP zu mcp_url (Default unten).
+    Die Extension zeigt connect/disconnect-Loops (code=1005) in der
+    Chrome Console — das ist normales HF-Spaces-WebSocket-Verhalten
+    und KEIN Blocker für den Worker.
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     """
 
     mcp_url: str = "https://openjerro-opensin-bridge-mcp.hf.space/mcp"
@@ -44,7 +57,8 @@ class VisionConfig:
     CONSEQUENCES: Wer NVIDIA nutzt (Default!), muss dieses Feld ignorieren.
     """
 
-    model: str = "nvidia/meta/llama-3.2-11b-vision-instruct"
+    # KEIN nvidia/ Prefix! Siehe NvidiaConfig Docstring für Details.
+    model: str = "meta/llama-3.2-11b-vision-instruct"
     max_steps: int = 120
     max_retries: int = 5
     max_no_progress: int = 15
@@ -59,14 +73,27 @@ class NvidiaConfig:
     WHY: API-Key, Modell-IDs und Fallback-Kette müssen konfigurierbar sein.
          Hardcoded API-URLs brechen bei Modellwechsel oder Region-Change.
     CONSEQUENCES: Alle NVIDIA-Parameter an einem Ort. Fallback-Kette explizit.
+
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ACHTUNG — KRITISCHE FALLE (2026-04-19 dokumentiert):
+    Modellnamen OHNE `nvidia/` Prefix!
+    Die NVIDIA NIM API erwartet z.B. `meta/llama-3.2-11b-vision-instruct`,
+    NICHT `nvidia/meta/llama-3.2-11b-vision-instruct`.
+    Mit dem falschen Prefix bekommt man `404 Not Found` von der API.
+    Das betrifft primary_model UND alle fallback_models.
+    Ebenso VisionConfig.model (Legacy-Feld) — gleiche Konvention.
+    Siehe auch: tests/test_config.py::test_worker_config_uses_typed_nested_defaults
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     """
 
     api_key: str = ""
     base_url: str = "https://integrate.api.nvidia.com/v1"
-    primary_model: str = "nvidia/meta/llama-3.2-11b-vision-instruct"
+    # KEIN nvidia/ Prefix! Nur der Org/Model-Pfad wie von NIM erwartet.
+    primary_model: str = "meta/llama-3.2-11b-vision-instruct"
     fallback_models: tuple[str, ...] = (
-        "nvidia/microsoft/phi-3.5-vision-instruct",
-        "nvidia/microsoft/phi-3-vision-128k-instruct",
+        # KEIN nvidia/ Prefix! Siehe Docstring oben.
+        "microsoft/phi-3.5-vision-instruct",
+        "microsoft/phi-3-vision-128k-instruct",
     )
     timeout: int = 120
     max_inline_bytes: int = 150_000
@@ -239,23 +266,17 @@ def load_config_from_env() -> WorkerConfig:
     audio_fallback_env = os.environ.get("AUDIO_ASR_FALLBACK_MODELS", "")
     audio_fallback = MediaConfig.audio_fallback_models
     if audio_fallback_env.strip():
-        audio_fallback = tuple(
-            m.strip() for m in audio_fallback_env.split(",") if m.strip()
-        )
+        audio_fallback = tuple(m.strip() for m in audio_fallback_env.split(",") if m.strip())
 
     video_fallback_env = os.environ.get("VIDEO_UNDERSTANDING_FALLBACK_MODELS", "")
     video_fallback = MediaConfig.video_fallback_models
     if video_fallback_env.strip():
-        video_fallback = tuple(
-            m.strip() for m in video_fallback_env.split(",") if m.strip()
-        )
+        video_fallback = tuple(m.strip() for m in video_fallback_env.split(",") if m.strip())
 
     explicit_urls_env = os.environ.get("HEYPIGGY_SURVEY_URLS", "")
     explicit_urls: tuple[str, ...] = ()
     if explicit_urls_env.strip():
-        explicit_urls = tuple(
-            u.strip() for u in explicit_urls_env.split(",") if u.strip()
-        )
+        explicit_urls = tuple(u.strip() for u in explicit_urls_env.split(",") if u.strip())
 
     return WorkerConfig(
         bridge=BridgeConfig(
@@ -309,9 +330,7 @@ def load_config_from_env() -> WorkerConfig:
         queue=QueueConfig(
             dashboard_url=os.environ.get("HEYPIGGY_DASHBOARD_URL", QueueConfig.dashboard_url),
             max_surveys=int(os.environ.get("HEYPIGGY_MAX_SURVEYS", QueueConfig.max_surveys)),
-            cooldown_sec=float(
-                os.environ.get("HEYPIGGY_COOLDOWN_SEC", QueueConfig.cooldown_sec)
-            ),
+            cooldown_sec=float(os.environ.get("HEYPIGGY_COOLDOWN_SEC", QueueConfig.cooldown_sec)),
             cooldown_jitter_sec=float(
                 os.environ.get("HEYPIGGY_COOLDOWN_JITTER", QueueConfig.cooldown_jitter_sec)
             ),
@@ -321,22 +340,14 @@ def load_config_from_env() -> WorkerConfig:
         persona=PersonaConfig(
             username=os.environ.get("HEYPIGGY_PERSONA", PersonaConfig.username),
             profiles_dir=os.environ.get("HEYPIGGY_PROFILES_DIR", PersonaConfig.profiles_dir),
-            answer_log_path=os.environ.get(
-                "HEYPIGGY_ANSWER_LOG", PersonaConfig.answer_log_path
-            ),
+            answer_log_path=os.environ.get("HEYPIGGY_ANSWER_LOG", PersonaConfig.answer_log_path),
             similarity_threshold=float(
-                os.environ.get(
-                    "HEYPIGGY_ANSWER_SIMILARITY", PersonaConfig.similarity_threshold
-                )
+                os.environ.get("HEYPIGGY_ANSWER_SIMILARITY", PersonaConfig.similarity_threshold)
             ),
             enabled=os.environ.get("HEYPIGGY_PERSONA_ENABLED", "1") != "0",
             brain_url=os.environ.get("BRAIN_URL", PersonaConfig.brain_url),
-            brain_project_id=os.environ.get(
-                "BRAIN_PROJECT_ID", PersonaConfig.brain_project_id
-            ),
-            brain_agent_id=os.environ.get(
-                "BRAIN_AGENT_ID", PersonaConfig.brain_agent_id
-            ),
+            brain_project_id=os.environ.get("BRAIN_PROJECT_ID", PersonaConfig.brain_project_id),
+            brain_agent_id=os.environ.get("BRAIN_AGENT_ID", PersonaConfig.brain_agent_id),
             brain_enabled=os.environ.get("BRAIN_ENABLED", "1") != "0",
             brain_timeout_sec=float(
                 os.environ.get("BRAIN_TIMEOUT_SEC", PersonaConfig.brain_timeout_sec)

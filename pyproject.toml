@@ -219,6 +219,12 @@ ignore_missing_imports = true
 # Pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# ACHTUNG — KRITISCHE FALLE (2026-04-19 dokumentiert):
+# Erfordert 'pytest-asyncio'. Ohne dieses Plugin schlägt der Teststart 
+# fehl, da 'asyncio_default_fixture_loop_scope' unbekannt ist.
+# INSTALLATION: 'pip install -e .[dev]' (NICHT nur 'pip install pytest').
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["."]

@@ -16,9 +16,11 @@
   references you see in stale docs).
 - **Entry point:** `heypiggy-worker run` (CLI) or
   `python heypiggy_vision_worker.py` (legacy direct-run).
-- **Primary LLM:** NVIDIA NIM `meta/llama-3.2-11b-vision-instruct`
-  (vision). Fallbacks: `microsoft/phi-3.5-vision-instruct`,
-  `microsoft/phi-3-vision-128k-instruct`.
+- **PYTHONPATH:** MUST be set to `.` for local module discovery (media_router, etc).
+- **BRIDGE_MCP_URL:** Defaults to HF Spaces. DO NOT set to localhost unless running a local bridge.
+- **Model Names:** NEVER use `nvidia/` prefix in `config.py`. NIM API expects bare paths (e.g., `meta/llama-3.2-11b-vision-instruct`).
+- **Setup:** Use `pip install -e '.[dev]'` to ensure `pytest-asyncio` is present for tests.
+- **Primary LLM:** NVIDIA NIM `meta/llama-3.2-11b-vision-instruct` (vision).
 - **Browser driver:** connects to a running **Bridge MCP** (Chromium
   controller) — the worker never launches its own browser.
 

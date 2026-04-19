@@ -21,18 +21,14 @@ class WorkerConfigTests(unittest.TestCase):
 
         self.assertIsInstance(cfg.bridge, BridgeConfig)
         self.assertIsInstance(cfg.vision, VisionConfig)
-        self.assertEqual(
-            cfg.bridge.mcp_url, "https://openjerro-opensin-bridge-mcp.hf.space/mcp"
-        )
-        self.assertEqual(cfg.vision.model, "nvidia/meta/llama-3.2-11b-vision-instruct")
-        self.assertEqual(
-            cfg.nvidia.primary_model, "nvidia/meta/llama-3.2-11b-vision-instruct"
-        )
+        self.assertEqual(cfg.bridge.mcp_url, "https://openjerro-opensin-bridge-mcp.hf.space/mcp")
+        self.assertEqual(cfg.vision.model, "meta/llama-3.2-11b-vision-instruct")
+        self.assertEqual(cfg.nvidia.primary_model, "meta/llama-3.2-11b-vision-instruct")
         self.assertEqual(
             cfg.nvidia.fallback_models,
             (
-                "nvidia/microsoft/phi-3.5-vision-instruct",
-                "nvidia/microsoft/phi-3-vision-128k-instruct",
+                "microsoft/phi-3.5-vision-instruct",
+                "microsoft/phi-3-vision-128k-instruct",
             ),
         )
         self.assertIn("click_element", cfg.click_actions)
@@ -57,9 +53,7 @@ class ArtifactConfigTests(unittest.TestCase):
             cfg.screenshot_dir,
             Path("/tmp/heypiggy/heypiggy_run_run-123/screenshots"),
         )
-        self.assertEqual(
-            cfg.audit_dir, Path("/tmp/heypiggy/heypiggy_run_run-123/audit")
-        )
+        self.assertEqual(cfg.audit_dir, Path("/tmp/heypiggy/heypiggy_run_run-123/audit"))
         self.assertEqual(
             cfg.session_dir,
             Path("/tmp/heypiggy/heypiggy_run_run-123/sessions"),
