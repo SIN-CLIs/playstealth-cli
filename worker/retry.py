@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: retry.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Generic async retry decorator with exponential backoff + jitter.
 
 Used by the bridge and vision clients. Intentionally dependency-free —
@@ -45,6 +55,13 @@ _ALWAYS_RERAISE: Final[tuple[type[BaseException], ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
+    # ========================================================================
+    # KLASSE: RetryPolicy
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Static description of a retry policy."""
 
     attempts: int = 3

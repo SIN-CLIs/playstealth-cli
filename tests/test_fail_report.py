@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: test_fail_report.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -53,6 +63,13 @@ def _sample_analysis() -> dict:
 
 
 class TestGenerateFailReportMarkdown:
+    # ========================================================================
+    # KLASSE: TestGenerateFailReportMarkdown
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für die Markdown-Report-Generierung."""
 
     def test_basic_report(self):
@@ -70,6 +87,15 @@ class TestGenerateFailReportMarkdown:
         assert "Scroll-Down vor Klick-Versuch" in report
 
     def test_report_has_markdown_structure(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_report_has_markdown_structure
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Report muss valides Markdown sein (Headers, Tabelle)."""
         report = generate_fail_report_markdown(
             analysis=_sample_analysis(),
@@ -81,6 +107,15 @@ class TestGenerateFailReportMarkdown:
         assert "| Feld | Wert |" in report
 
     def test_report_with_keyframe_urls(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_report_with_keyframe_urls
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Keyframe-URLs müssen als Link-Liste erscheinen."""
         report = generate_fail_report_markdown(
             analysis=_sample_analysis(),
@@ -96,6 +131,15 @@ class TestGenerateFailReportMarkdown:
         assert "Frame 2:" in report
 
     def test_report_with_error(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_report_with_error
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Analyse-Fehler müssen im Report sichtbar sein."""
         analysis = _sample_analysis()
         analysis["error"] = "NVIDIA Timeout nach 120s"
@@ -104,6 +148,15 @@ class TestGenerateFailReportMarkdown:
         assert "NVIDIA Timeout" in report
 
     def test_report_without_error(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_report_without_error
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Ohne Fehler soll keine Fehler-Sektion erscheinen."""
         analysis = _sample_analysis()
         analysis["error"] = ""
@@ -111,6 +164,15 @@ class TestGenerateFailReportMarkdown:
         assert "### ⚠️ Analyse-Fehler" not in report
 
     def test_report_with_empty_analysis(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_report_with_empty_analysis
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Leere Analyse darf nicht crashen — Defaults müssen greifen."""
         report = generate_fail_report_markdown(
             analysis={},
@@ -120,6 +182,15 @@ class TestGenerateFailReportMarkdown:
         assert "N/A" in report  # Default affected_step
 
     def test_report_json_block(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_report_json_block
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Raw-Analysis muss als JSON-Block im Report sein."""
         report = generate_fail_report_markdown(
             analysis=_sample_analysis(),
@@ -129,6 +200,15 @@ class TestGenerateFailReportMarkdown:
         assert "```json" in report
 
     def test_confidence_formatting_float(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_confidence_formatting_float
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Float-Confidence muss als Prozent formatiert werden (z.B. 85%)."""
         analysis = _sample_analysis()
         analysis["confidence_score"] = 0.85
@@ -136,6 +216,15 @@ class TestGenerateFailReportMarkdown:
         assert "85%" in report
 
     def test_confidence_formatting_int(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_confidence_formatting_int
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Integer-Confidence muss auch korrekt formatiert werden."""
         analysis = _sample_analysis()
         analysis["confidence_score"] = 1
@@ -144,6 +233,15 @@ class TestGenerateFailReportMarkdown:
         assert "100%" in report
 
     def test_boolean_flags_display(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_boolean_flags_display
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Boolean-Flags müssen visuell erkennbar sein (✅/❌)."""
         analysis = _sample_analysis()
         analysis["captcha_detected"] = True
@@ -153,6 +251,15 @@ class TestGenerateFailReportMarkdown:
         assert "❌ Nein" in report  # timing_issue = False
 
     def test_max_keyframe_urls(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_max_keyframe_urls
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Maximal 6 Keyframe-URLs werden angezeigt (übersichtlich)."""
         urls = [f"https://box.com/frame{i}.png" for i in range(10)]
         report = generate_fail_report_markdown(
@@ -170,6 +277,13 @@ class TestGenerateFailReportMarkdown:
 
 
 class TestPostGithubIssueComment:
+    # ========================================================================
+    # KLASSE: TestPostGithubIssueComment
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für die GitHub Issue Comment Funktion."""
 
     @patch("fail_report.subprocess.run")
@@ -186,6 +300,15 @@ class TestPostGithubIssueComment:
 
     @patch("fail_report.subprocess.run")
     def test_failed_post(self, mock_run):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_failed_post
+    # PARAMETER: self, mock_run
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Fehlgeschlagener gh-Aufruf muss False zurückgeben, kein Crash."""
         mock_run.return_value = MagicMock(returncode=1)
         result = post_github_issue_comment(
@@ -197,6 +320,15 @@ class TestPostGithubIssueComment:
 
     @patch("fail_report.subprocess.run")
     def test_exception_returns_false(self, mock_run):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_exception_returns_false
+    # PARAMETER: self, mock_run
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Exceptions (gh nicht installiert, Timeout) dürfen nicht crashen."""
         mock_run.side_effect = FileNotFoundError("gh not found")
         result = post_github_issue_comment(
@@ -208,6 +340,15 @@ class TestPostGithubIssueComment:
 
     @patch("fail_report.subprocess.run")
     def test_body_truncated_at_65k(self, mock_run):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_body_truncated_at_65k
+    # PARAMETER: self, mock_run
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: GitHub hat ein 65535 Zeichen Limit für Comments."""
         mock_run.return_value = MagicMock(returncode=0)
         long_body = "x" * 100_000
@@ -224,6 +365,13 @@ class TestPostGithubIssueComment:
 
 
 class TestUploadToBox:
+    # ========================================================================
+    # KLASSE: TestUploadToBox
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für den Box.com Upload."""
 
     def test_no_env_vars_returns_none(self):
@@ -257,6 +405,15 @@ class TestUploadToBox:
                 original_open = builtins.open
 
                 def mock_open(path, *args, **kwargs):
+    # -------------------------------------------------------------------------
+    # FUNKTION: mock_open
+    # PARAMETER: path, *args, **kwargs
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
                     m = MagicMock()
                     m.__enter__ = lambda s: MagicMock(read=lambda: b"fake_png_data")
                     m.__exit__ = MagicMock(return_value=False)
@@ -268,6 +425,15 @@ class TestUploadToBox:
         assert result == "https://box.com/public/test.png"
 
     def test_upload_exception_returns_none(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_upload_exception_returns_none
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Netzwerk-Fehler beim Upload dürfen nicht crashen."""
         with patch.dict(
             "os.environ",
@@ -287,6 +453,13 @@ class TestUploadToBox:
 
 
 class TestSaveFailReportToDisk:
+    # ========================================================================
+    # KLASSE: TestSaveFailReportToDisk
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für die lokale Speicherung von Fail-Reports."""
 
     def test_saves_markdown_and_json(self, tmp_path: Path):
@@ -309,6 +482,15 @@ class TestSaveFailReportToDisk:
         assert loaded["root_cause"] == analysis["root_cause"]
 
     def test_creates_nested_directory(self, tmp_path: Path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_creates_nested_directory
+    # PARAMETER: self, tmp_path: Path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Nicht existierende Verzeichnisse müssen automatisch erstellt werden."""
         deep = tmp_path / "a" / "b" / "c"
         save_fail_report_to_disk(
@@ -321,6 +503,15 @@ class TestSaveFailReportToDisk:
         assert (deep / "fail_report_nested.md").exists()
 
     def test_returns_md_path(self, tmp_path: Path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_returns_md_path
+    # PARAMETER: self, tmp_path: Path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Rückgabewert muss der Pfad zur Markdown-Datei sein."""
         result = save_fail_report_to_disk(
             report_md="test",

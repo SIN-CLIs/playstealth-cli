@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: __main__.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Entry point for ``python -m worker``.
 
 Delegates to :func:`worker.cli.main` so that both of these work identically::

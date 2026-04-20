@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: test_nvidia_video_analyzer.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -59,6 +69,13 @@ def _make_nvidia_response(analysis: dict) -> str:
 
 
 class TestAnalyzeFailMultiframeValidation:
+    # ========================================================================
+    # KLASSE: TestAnalyzeFailMultiframeValidation
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für Input-Validierung vor dem API-Call."""
 
     @pytest.mark.asyncio
@@ -75,6 +92,15 @@ class TestAnalyzeFailMultiframeValidation:
 
     @pytest.mark.asyncio
     async def test_no_keyframes(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_no_keyframes
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Ohne Keyframes gibt es nichts zu analysieren."""
         result = await analyze_fail_multiframe(
             keyframe_bytes=[],
@@ -86,6 +112,15 @@ class TestAnalyzeFailMultiframeValidation:
 
     @pytest.mark.asyncio
     async def test_max_12_frames(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_max_12_frames
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Mehr als 12 Frames werden abgeschnitten (NVIDIA Token-Budget)."""
         # 15 Frames senden, aber nur 12 sollten im Payload ankommen
         frames = [_fake_png(50) for _ in range(15)]
@@ -94,6 +129,15 @@ class TestAnalyzeFailMultiframeValidation:
         captured_payload = {}
 
         def _mock_request():
+    # -------------------------------------------------------------------------
+    # FUNKTION: _mock_request
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
             return (200, _make_nvidia_response({"root_cause": "test"}), "")
 
         with patch("nvidia_video_analyzer.urllib.request") as mock_urllib:
@@ -110,6 +154,15 @@ class TestAnalyzeFailMultiframeValidation:
             original_request = mock_urllib.Request
 
             def capture_request(url, data=None, **kwargs):
+    # -------------------------------------------------------------------------
+    # FUNKTION: capture_request
+    # PARAMETER: url, data=None, **kwargs
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
                 if data:
                     captured_payload["data"] = json.loads(data.decode("utf-8"))
                 req = MagicMock()
@@ -136,6 +189,13 @@ class TestAnalyzeFailMultiframeValidation:
 
 
 class TestAnalyzeFailMultiframeResponses:
+    # ========================================================================
+    # KLASSE: TestAnalyzeFailMultiframeResponses
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für verschiedene API-Response-Szenarien."""
 
     @pytest.mark.asyncio
@@ -178,6 +238,15 @@ class TestAnalyzeFailMultiframeResponses:
 
     @pytest.mark.asyncio
     async def test_http_error_returns_error_dict(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_http_error_returns_error_dict
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: HTTP-Fehler müssen als sauberes error-Dict zurückkommen, kein Crash."""
         with patch("nvidia_video_analyzer.urllib.request") as mock_urllib:
             import urllib.error
@@ -201,6 +270,15 @@ class TestAnalyzeFailMultiframeResponses:
 
     @pytest.mark.asyncio
     async def test_timeout_returns_error_dict(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_timeout_returns_error_dict
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Timeout darf den Worker nicht crashen."""
         with patch("nvidia_video_analyzer.asyncio.to_thread") as mock_thread:
             mock_thread.side_effect = asyncio.TimeoutError()
@@ -217,6 +295,15 @@ class TestAnalyzeFailMultiframeResponses:
 
     @pytest.mark.asyncio
     async def test_empty_choices_returns_error(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_empty_choices_returns_error
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Leere choices in der Response müssen erkannt werden."""
         empty_response = json.dumps({"choices": [], "model": "test"})
 
@@ -240,6 +327,15 @@ class TestAnalyzeFailMultiframeResponses:
 
     @pytest.mark.asyncio
     async def test_invalid_json_in_content_uses_regex_fallback(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_invalid_json_in_content_uses_regex_fallback
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Wenn NVIDIA Prosa um das JSON wickelt, muss Regex-Fallback greifen."""
         # Content mit Prosa-Wrapper um das JSON
         wrapped = json.dumps(
@@ -280,6 +376,13 @@ class TestAnalyzeFailMultiframeResponses:
 
 
 class TestMaybeDownscale:
+    # ========================================================================
+    # KLASSE: TestMaybeDownscale
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für die Bild-Downscale-Logik."""
 
     def test_small_image_unchanged(self):
@@ -303,6 +406,13 @@ class TestMaybeDownscale:
 
 
 class TestPromptTemplate:
+    # ========================================================================
+    # KLASSE: TestPromptTemplate
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für das FAIL_ANALYSIS_PROMPT Template."""
 
     def test_prompt_has_placeholders(self):

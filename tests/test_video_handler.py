@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_video_handler.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 Unit-Tests für video_handler.
@@ -22,6 +32,15 @@ from video_handler import (
 
 
 def test_prompt_block_minimal():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_prompt_block_minimal
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     v = VideoUnderstanding(
         summary="Ein Mann trinkt Cola.",
         objects=("Mann", "Cola-Dose"),
@@ -42,6 +61,15 @@ def test_prompt_block_minimal():
 
 
 def test_prompt_block_with_error():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_prompt_block_with_error
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     v = VideoUnderstanding(
         summary="",
         objects=(),
@@ -61,29 +89,74 @@ def test_prompt_block_with_error():
 
 
 def test_extract_json_plain():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_extract_json_plain
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     text = '{"summary": "ok", "objects": ["a"]}'
     out = _extract_json(text)
     assert out == {"summary": "ok", "objects": ["a"]}
 
 
 def test_extract_json_with_markdown():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_extract_json_with_markdown
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     text = '```json\n{"summary": "ok"}\n```'
     out = _extract_json(text)
     assert out == {"summary": "ok"}
 
 
 def test_extract_json_embedded():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_extract_json_embedded
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     text = 'Blah blah {"summary": "wow"} footer'
     out = _extract_json(text)
     assert out == {"summary": "wow"}
 
 
 def test_extract_json_invalid():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_extract_json_invalid
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     assert _extract_json("no json here") is None
     assert _extract_json("") is None
 
 
 def test_parse_video_response_happy():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_parse_video_response_happy
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     data = {
         "choices": [
             {
@@ -105,12 +178,30 @@ def test_parse_video_response_happy():
 
 
 def test_parse_video_response_missing_choices():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_parse_video_response_missing_choices
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     parsed = _parse_video_response({"choices": []})
     assert parsed["summary"] == ""
     assert parsed["objects"] == []
 
 
 def test_download_video_data_url():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_download_video_data_url
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     payload = b"FAKEMP4" * 100
     encoded = base64.b64encode(payload).decode("ascii")
     url = f"data:video/mp4;base64,{encoded}"
@@ -119,6 +210,15 @@ def test_download_video_data_url():
 
 
 def test_download_video_file(tmp_path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_download_video_file
+    # PARAMETER: tmp_path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     f = tmp_path / "v.mp4"
     f.write_bytes(b"MP4DATA")
     raw = _download_video(f"file://{f}", max_bytes=1000)
@@ -126,6 +226,15 @@ def test_download_video_file(tmp_path):
 
 
 def test_download_video_too_large(tmp_path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_download_video_too_large
+    # PARAMETER: tmp_path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     f = tmp_path / "big.mp4"
     f.write_bytes(b"X" * 5000)
     try:
@@ -137,6 +246,15 @@ def test_download_video_too_large(tmp_path):
 
 
 def test_understand_without_api_key():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_understand_without_api_key
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     result = asyncio.run(
         understand_video("https://example.com/v.mp4", nvidia_api_key="")
     )

@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: global_brain_client.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 OpenSIN Global Brain HTTP-Client.
 
@@ -46,6 +56,13 @@ DEFAULT_LOCAL_FALLBACK = Path(os.environ.get("BRAIN_LOCAL_FALLBACK", ".pcpm"))
 
 @dataclass
 class PrimeContext:
+    # ========================================================================
+    # KLASSE: PrimeContext
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Initialer Kontext der beim Attach vom Brain geliefert wird.
 
@@ -67,6 +84,13 @@ class PrimeContext:
 
 
 class GlobalBrainClient:
+    # ========================================================================
+    # KLASSE: GlobalBrainClient
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Non-blocking HTTP-Client gegen den brain-core Daemon.
 

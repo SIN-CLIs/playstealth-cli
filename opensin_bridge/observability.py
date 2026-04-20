@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: observability.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Structured trace sink that plays nicely with ``observability.py``.
 
 Ties together ``BridgeAdapter`` traces, runtime state transitions, and

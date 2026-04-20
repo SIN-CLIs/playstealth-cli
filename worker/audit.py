@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: audit.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Append-only JSONL audit log for compliance + debugging.
 
 Every security-relevant event (auth attempts, worker takeovers, vision
@@ -29,6 +39,13 @@ _SCHEMA_VERSION: Final[str] = "1"
 
 
 class AuditLogger:
+    # ========================================================================
+    # KLASSE: AuditLogger
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """JSONL audit-log sink.
 
     Instances are cheap to construct and reusable across the life of a run.

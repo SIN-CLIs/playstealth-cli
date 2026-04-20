@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: telemetry.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Optional OpenTelemetry integration.
 
 Tracing is **opt-in**: unless ``OTEL_ENABLED=true`` is set and the
@@ -31,6 +41,13 @@ _log = get_logger(__name__)
 
 
 class _SpanLike(Protocol):
+    # ========================================================================
+    # KLASSE: _SpanLike(Protocol)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def set_attribute(self, key: str, value: Any) -> None: ...
     def record_exception(self, exc: BaseException) -> None: ...
     def end(self) -> None: ...

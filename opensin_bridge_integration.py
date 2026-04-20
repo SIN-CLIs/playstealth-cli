@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: opensin_bridge_integration.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Legacy <-> new-stack bridge.
 
 ``heypiggy_vision_worker.py`` keeps working unchanged. New code paths can
@@ -26,6 +36,13 @@ RpcFn = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 @dataclass
 class OpenSinStack:
+    # ========================================================================
+    # KLASSE: OpenSinStack
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     bridge: BridgeAdapter
     engine: InteractionEngine
     state: StateMachine

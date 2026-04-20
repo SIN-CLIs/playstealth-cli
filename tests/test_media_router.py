@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_media_router.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 Tests fuer media_router.py — prueft Snapshot-Erkennung, Playback-Trigger,
 URL-Caching und Prompt-Block-Rendering.
@@ -22,6 +32,15 @@ from video_handler import VideoUnderstanding
 
 @pytest.fixture
 def router():
+    # -------------------------------------------------------------------------
+    # FUNKTION: router
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     execute_bridge = AsyncMock()
     r = MediaRouter(
         execute_bridge=execute_bridge,
@@ -35,6 +54,15 @@ def router():
 
 
 def _bridge_result(**kwargs):
+    # -------------------------------------------------------------------------
+    # FUNKTION: _bridge_result
+    # PARAMETER: **kwargs
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Baut ein dict wie execute_javascript es zurueckgibt."""
     return {
         "result": {
@@ -48,6 +76,15 @@ def _bridge_result(**kwargs):
 
 @pytest.mark.asyncio
 async def test_scan_empty_page(router):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_scan_empty_page
+    # PARAMETER: router
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     router._bridge.return_value = _bridge_result()
     snap = await router.scan_page()
     assert not snap.has_media
@@ -58,6 +95,15 @@ async def test_scan_empty_page(router):
 
 @pytest.mark.asyncio
 async def test_scan_detects_audio_video_images(router):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_scan_detects_audio_video_images
+    # PARAMETER: router
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     router._bridge.return_value = _bridge_result(
         audio=[{"src": "https://cdn.example.com/q1.mp3", "selector": "audio"}],
         video=[{"src": "https://cdn.example.com/clip.mp4", "selector": "video"}],
@@ -72,6 +118,15 @@ async def test_scan_detects_audio_video_images(router):
 
 @pytest.mark.asyncio
 async def test_scan_handles_bridge_error(router):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_scan_handles_bridge_error
+    # PARAMETER: router
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Bridge-Fehler darf den Worker nicht crashen — leerer Snapshot ist der Vertrag."""
     router._bridge.side_effect = RuntimeError("bridge dead")
     snap = await router.scan_page()
@@ -98,6 +153,15 @@ async def test_scan_filters_items_without_src(router):
 
 @pytest.mark.asyncio
 async def test_ensure_media_playing_no_op_when_empty(router):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_ensure_media_playing_no_op_when_empty
+    # PARAMETER: router
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     snap = MediaSnapshot()
     await router.ensure_media_playing(snap)
     # Bridge wurde NICHT aufgerufen weil nichts abzuspielen war
@@ -106,6 +170,15 @@ async def test_ensure_media_playing_no_op_when_empty(router):
 
 @pytest.mark.asyncio
 async def test_ensure_media_playing_triggers_js(router):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_ensure_media_playing_triggers_js
+    # PARAMETER: router
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     router._bridge.return_value = {"result": {"triggered": 2}}
     snap = MediaSnapshot(audio_urls=("a.mp3",), video_urls=("v.mp4",))
     await router.ensure_media_playing(snap)
@@ -116,6 +189,15 @@ async def test_ensure_media_playing_triggers_js(router):
 
 @pytest.mark.asyncio
 async def test_analyze_no_media_returns_empty(router):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_analyze_no_media_returns_empty
+    # PARAMETER: router
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     snap = MediaSnapshot()
     analysis = await router.analyze(snap)
     assert analysis.audio_transcripts == ()
@@ -125,6 +207,15 @@ async def test_analyze_no_media_returns_empty(router):
 
 @pytest.mark.asyncio
 async def test_analyze_uses_audio_cache(router, monkeypatch):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_analyze_uses_audio_cache
+    # PARAMETER: router, monkeypatch
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Dieselbe URL darf nicht zweimal transkribiert werden — NIM-Calls sind teuer."""
     call_count = {"n": 0}
 
@@ -145,6 +236,15 @@ async def test_analyze_uses_audio_cache(router, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_analyze_handles_partial_failure(router, monkeypatch):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_analyze_handles_partial_failure
+    # PARAMETER: router, monkeypatch
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Ein Fehler bei Video darf den Audio-Erfolg nicht ausloeschen."""
     async def fake_transcribe(url, **kwargs):
         return AudioTranscript(
@@ -153,6 +253,15 @@ async def test_analyze_handles_partial_failure(router, monkeypatch):
         )
 
     async def fake_understand(url, **kwargs):
+    # -------------------------------------------------------------------------
+    # FUNKTION: fake_understand
+    # PARAMETER: url, **kwargs
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         raise RuntimeError("NIM 500")
 
     monkeypatch.setattr("media_router.transcribe_audio", fake_transcribe)
@@ -170,7 +279,25 @@ async def test_analyze_handles_partial_failure(router, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prompt_block_includes_transcripts(router, monkeypatch):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_prompt_block_includes_transcripts
+    # PARAMETER: router, monkeypatch
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     async def fake_transcribe(url, **kwargs):
+    # -------------------------------------------------------------------------
+    # FUNKTION: fake_transcribe
+    # PARAMETER: url, **kwargs
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         return AudioTranscript(
             transcript="Kaufen Sie Coca Cola", language="de", confidence=0.9,
             duration_sec=4.0, model_used="nvidia/parakeet-tdt-0.6b-v2",
@@ -188,6 +315,15 @@ async def test_prompt_block_includes_transcripts(router, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_snapshot_has_any_detection():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_snapshot_has_any_detection
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     assert not MediaSnapshot().has_media
     assert MediaSnapshot(audio_urls=("x",)).has_media
     assert MediaSnapshot(video_urls=("x",)).has_media

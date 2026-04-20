@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: sitepack.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 from __future__ import annotations
 
 import json
@@ -13,6 +23,13 @@ _log = get_logger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class Sitepack:
+    # ========================================================================
+    # KLASSE: Sitepack
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     site: str
     version: str
     selectors: dict[str, str]
@@ -21,6 +38,13 @@ class Sitepack:
 
 
 class SitepackLoader:
+    # ========================================================================
+    # KLASSE: SitepackLoader
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def __init__(self) -> None:
         self._pack: Sitepack | None = None
 

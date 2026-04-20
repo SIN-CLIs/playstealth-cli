@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: heypiggy_vision_worker.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -351,6 +361,15 @@ ANSWER_HISTORY_PATH = Path("/tmp/heypiggy_answer_history.json")
 
 
 def load_answer_history():
+    # -------------------------------------------------------------------------
+    # FUNKTION: load_answer_history
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Lädt frühere Survey-Antworten für Konsistenz-Prüfung."""
     if ANSWER_HISTORY_PATH.exists():
         try:
@@ -362,6 +381,15 @@ def load_answer_history():
 
 
 def save_answer_history(data):
+    # -------------------------------------------------------------------------
+    # FUNKTION: save_answer_history
+    # PARAMETER: data
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Speichert Survey-Antworten für zukünftige Konsistenz-Prüfung."""
     ANSWER_HISTORY_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -377,6 +405,15 @@ def record_answer(question, answer):
 
 
 def get_consistent_answer(question):
+    # -------------------------------------------------------------------------
+    # FUNKTION: get_consistent_answer
+    # PARAMETER: question
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Holt frühere Antwort für dieselbe Frage zur Konsistenz-Sicherung."""
     hist = load_answer_history()
     for sid, answers in hist["surveys"].items():
@@ -800,6 +837,15 @@ AUDIT_LOG_PATH = AUDIT_DIR / "audit.jsonl"
 
 
 def audit(event_type: str, **data):
+    # -------------------------------------------------------------------------
+    # FUNKTION: audit
+    # PARAMETER: event_type: str, **data
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Schreibt einen Audit-Eintrag ins Log.
     WHY: Damit wir bei JEDEM Fehler exakt nachvollziehen können was passiert ist.
@@ -1386,6 +1432,15 @@ async def ensure_worker_preflight() -> dict:
 
 
 def fetch_health():
+    # -------------------------------------------------------------------------
+    # FUNKTION: fetch_health
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Holt den Bridge-Health-Status.
     WHY: Vor JEDER Aktion muss die Bridge erreichbar sein.
@@ -1400,6 +1455,15 @@ def fetch_health():
 
 
 async def wait_for_extension(timeout=600):
+    # -------------------------------------------------------------------------
+    # FUNKTION: wait_for_extension
+    # PARAMETER: timeout=600
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Wartet robust auf die Extension-Verbindung.
     WHY: Ohne Extension sind alle Bridge-Calls sinnlos.
@@ -1434,6 +1498,15 @@ async def wait_for_extension(timeout=600):
 
 
 def post_mcp(method: str, params: dict = None):
+    # -------------------------------------------------------------------------
+    # FUNKTION: post_mcp
+    # PARAMETER: method: str, params: dict = None
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Sendet einen MCP-Request an die Bridge mit 3x Retry und Error-Body-Parsing.
     WHY: Die Bridge kann kurzzeitig 500er liefern, das darf nicht zum Crash führen.
@@ -1484,6 +1557,15 @@ def post_mcp(method: str, params: dict = None):
 
 
 def decode_mcp_result(raw):
+    # -------------------------------------------------------------------------
+    # FUNKTION: decode_mcp_result
+    # PARAMETER: raw
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Decodiert das MCP-Result aus der verschachtelten JSON-RPC Struktur.
     WHY: Die Bridge gibt content[0].text zurück, das muss entpackt werden.
@@ -1516,6 +1598,15 @@ def normalize_selector(selector: str) -> str:
 
 
 async def click_visible_button_with_text(text_hint: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: click_visible_button_with_text
+    # PARAMETER: text_hint: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Klicke einen sichtbaren Button anhand seines Textinhalts.
     WHY: Vision kann dashboard-blockierende Gate-Buttons wie
@@ -1697,6 +1788,15 @@ async def resolve_survey_selector(selector: str, description: str = "") -> str:
             break
 
     def _card_price(card):
+    # -------------------------------------------------------------------------
+    # FUNKTION: _card_price
+    # PARAMETER: card
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         text = str(card.get("text", ""))
         m = re.search(r"(\d+[.,]\d+)\s*€", text)
         if not m:
@@ -1819,6 +1919,15 @@ async def recover_worker_tab_id() -> int | None:
 
 
 async def execute_bridge(method: str, params: dict[str, object] | None = None):
+    # -------------------------------------------------------------------------
+    # FUNKTION: execute_bridge
+    # PARAMETER: method: str, params: dict[str, object] | None = None
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Fuehrt einen Bridge-Tool-Call aus, decodiert das Ergebnis, und retried
     bei transienten Fehlern (5xx, connection reset, timeouts) mit
@@ -1916,6 +2025,15 @@ async def execute_bridge(method: str, params: dict[str, object] | None = None):
 
 
 async def check_bridge_alive():
+    # -------------------------------------------------------------------------
+    # FUNKTION: check_bridge_alive
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Prüft ob die Bridge noch lebt, und wartet ggf. auf Reconnect.
     WHY: Mitten im Lauf kann die Extension disconnecten (Tab-Crash, Sleep, etc.)
@@ -1944,6 +2062,15 @@ async def check_bridge_alive():
 
 
 async def take_screenshot(step_num: int, label: str = ""):
+    # -------------------------------------------------------------------------
+    # FUNKTION: take_screenshot
+    # PARAMETER: step_num: int, label: str = ""
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Macht einen Screenshot der exakt bekannten Worker-Tab-Instanz und speichert ihn als PNG.
     WHY: Jeder einzelne Schritt muss visuell dokumentiert werden (PRIORITY -7.0).
@@ -2008,6 +2135,15 @@ async def take_screenshot(step_num: int, label: str = ""):
 
 
 async def dom_prescan():
+    # -------------------------------------------------------------------------
+    # FUNKTION: dom_prescan
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
         Scannt die aktuelle Seite nach klickbaren Elementen und liefert echte Selektoren.
     WHY: Das Vision-LLM DARF NIEMALS CSS-Selektoren raten! Es muss die echten kennen.
@@ -3920,6 +4056,15 @@ def _vision_cache_put(
 
 
 async def ask_vision(screenshot_path: str, action_desc: str, expected: str, step_num: int):
+    # -------------------------------------------------------------------------
+    # FUNKTION: ask_vision
+    # PARAMETER: screenshot_path: str, action_desc: str, expected: str, step_num: int
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Sendet einen Screenshot + DOM-Kontext ans konfigurierte Vision-LLM
     (Primary: NVIDIA NIM meta/llama-3.2-11b-vision-instruct,
@@ -4190,6 +4335,15 @@ ANTWORT-FORMAT (NUR dieses JSON, NICHTS anderes):
 
 
 async def keyboard_action(keys: list, selector: str = ""):
+    # -------------------------------------------------------------------------
+    # FUNKTION: keyboard_action
+    # PARAMETER: keys: list, selector: str = ""
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Führt Tastatur-Aktionen aus via JavaScript KeyboardEvent Dispatch.
     WHY: Wenn ALLE Klick-Methoden scheitern, funktionieren Tastatur-Events IMMER,
@@ -4268,6 +4422,15 @@ async def keyboard_action(keys: list, selector: str = ""):
 
 
 async def dom_verify_change(before_url: str, before_title: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: dom_verify_change
+    # PARAMETER: before_url: str, before_title: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Prüft via DOM ob die Seite sich nach einer Aktion verändert hat.
     WHY: Vision allein kann täuschen (gleicher Screenshot, aber DOM hat sich geändert).
@@ -4374,6 +4537,22 @@ async def escalating_click(
     step_num: int = 0,
     ref: str = "",
 ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: escalating_click
+    # PARAMETER: 
+    selector: str = "",
+    description: str = "",
+    x: int = None,
+    y: int = None,
+    step_num: int = 0,
+    ref: str = "",
+
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Versucht einen Klick mit bis zu 5 Methoden — JEDE durch Vision-Gate abgesichert.
     WHY: Verschiedene Webseiten-Technologien brauchen verschiedene Interaktionsmethoden.
@@ -4668,6 +4847,15 @@ async def escalating_click(
 
 
 async def save_session(label: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: save_session
+    # PARAMETER: label: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Sichert die aktuelle Browser-Session (Cookies + LocalStorage + SessionStorage).
     WHY: Bei Bridge-Disconnect oder Crash muessen wir die Session wiederherstellen
@@ -4708,6 +4896,15 @@ async def save_session(label: str):
 
 
 async def human_delay(min_sec=1.5, max_sec=4.5):
+    # -------------------------------------------------------------------------
+    # FUNKTION: human_delay
+    # PARAMETER: min_sec=1.5, max_sec=4.5
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """
     Wartet eine zufällige Zeitspanne wie ein echter Mensch.
     WHY: Konstante Delays (z.B. immer 3s) sind ein Bot-Signal.
@@ -4777,6 +4974,13 @@ async def adaptive_think_delay(
 
 
 class VisionGateController:
+    # ========================================================================
+    # KLASSE: VisionGateController
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Steuert den gesamten Vision-Gate-Loop und verhindert Endlosschleifen.
 
@@ -4821,6 +5025,21 @@ class VisionGateController:
         page_state: str = None,
         dom_changed: bool = False,
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: record_step
+    # PARAMETER: 
+        self,
+        verdict: str,
+        screenshot_hash: str,
+        page_state: str = None,
+        dom_changed: bool = False,
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Zeichnet einen Schritt auf und aktualisiert alle Zähler."""
         self.total_steps += 1
 
@@ -4868,6 +5087,15 @@ class VisionGateController:
             self.successful_actions += 1
 
     def add_failed_selector(self, selector: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: add_failed_selector
+    # PARAMETER: self, selector: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Merkt sich einen fehlgeschlagenen Selektor um ihn nicht nochmal zu versuchen."""
         if selector:
             self.failed_selectors[selector] = self.failed_selectors.get(selector, 0) + 1
@@ -4883,9 +5111,27 @@ class VisionGateController:
         return len(self.action_history) == 3 and len(set(self.action_history)) == 1
 
     def clear_action_history(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: clear_action_history
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         self.action_history.clear()
 
     def mark_dom_progress(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: mark_dom_progress
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Setzt no_progress_count zurück wenn DOM-Verifikation echte Änderung bestätigt.
         WHY: record_step() läuft VOR der Aktion und kennt dom_changed noch nicht.
@@ -4901,6 +5147,15 @@ class VisionGateController:
             )
 
     def reset_for_new_survey(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: reset_for_new_survey
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Setzt Pro-Survey-Counter zurück wenn eine neue Umfrage startet.
         WHY: MAX_STEPS, consecutive_retries und no_progress_count sind gedacht
@@ -5102,6 +5357,15 @@ def inject_credentials(params: dict, email: str, pwd: str) -> dict:
 
 
 async def handle_scroll(direction: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: handle_scroll
+    # PARAMETER: direction: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Scrollt die Seite nach oben oder unten."""
     tab_params = _tab_params()
     pixels = 400 if direction == "scroll_down" else -400
@@ -5294,6 +5558,15 @@ async def _finalize_worker_run(
 
 
 async def main():
+    # -------------------------------------------------------------------------
+    # FUNKTION: main
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     global CURRENT_RUN_SUMMARY, BUDGET_GUARD
     run_summary = RunSummary(run_id=RUN_ID)
     CURRENT_RUN_SUMMARY = run_summary
@@ -5377,6 +5650,15 @@ async def main():
     global MEDIA_ROUTER, SURVEY_ORCHESTRATOR
 
     def _queue_audit(event: str, **data):
+    # -------------------------------------------------------------------------
+    # FUNKTION: _queue_audit
+    # PARAMETER: event: str, **data
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         audit(event, **data)
 
     if WORKER_CONFIG.media.enabled:

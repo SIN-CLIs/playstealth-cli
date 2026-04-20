@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_survey_orchestrator.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 Tests fuer survey_orchestrator.py — prueft Queue-Management, explizite Listen,
 Auto-Detect, Cooldown-Logik und Limit-Handling.
@@ -23,17 +33,44 @@ from survey_orchestrator import QueueState, SurveyOrchestrator
 
 @pytest.fixture
 def bridge():
+    # -------------------------------------------------------------------------
+    # FUNKTION: bridge
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     return AsyncMock()
 
 
 @pytest.fixture
 def tmp_history():
+    # -------------------------------------------------------------------------
+    # FUNKTION: tmp_history
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     with tempfile.TemporaryDirectory() as d:
         yield Path(d) / "history.json"
 
 
 @pytest.fixture
 def orch(bridge, tmp_history):
+    # -------------------------------------------------------------------------
+    # FUNKTION: orch
+    # PARAMETER: bridge, tmp_history
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     return SurveyOrchestrator(
         execute_bridge=bridge,
         tab_params_factory=lambda: {"tab_id": "t1"},
@@ -49,6 +86,15 @@ def orch(bridge, tmp_history):
 
 @pytest.mark.asyncio
 async def test_begin_with_explicit_url_starts_running(orch, bridge):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_begin_with_explicit_url_starts_running
+    # PARAMETER: orch, bridge
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     bridge.return_value = {"ok": True}
     record = await orch.begin()
     assert record is not None
@@ -59,6 +105,15 @@ async def test_begin_with_explicit_url_starts_running(orch, bridge):
 
 @pytest.mark.asyncio
 async def test_begin_with_no_urls_and_no_autodetect_sets_exhausted(bridge, tmp_history):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_begin_with_no_urls_and_no_autodetect_sets_exhausted
+    # PARAMETER: bridge, tmp_history
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     orch = SurveyOrchestrator(
         execute_bridge=bridge,
         tab_params_factory=lambda: {},
@@ -76,6 +131,15 @@ async def test_begin_with_no_urls_and_no_autodetect_sets_exhausted(bridge, tmp_h
 
 @pytest.mark.asyncio
 async def test_explicit_urls_consumed_in_order(bridge, tmp_history):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_explicit_urls_consumed_in_order
+    # PARAMETER: bridge, tmp_history
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     urls = [
         "https://www.heypiggy.com/survey/1",
         "https://www.heypiggy.com/survey/2",
@@ -104,6 +168,15 @@ async def test_explicit_urls_consumed_in_order(bridge, tmp_history):
 
 @pytest.mark.asyncio
 async def test_max_surveys_limit_triggers_limit_reached(orch, bridge):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_max_surveys_limit_triggers_limit_reached
+    # PARAMETER: orch, bridge
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Mit max_surveys=5 und 5 abgeschlossenen Surveys muss LIMIT_REACHED kommen."""
     bridge.return_value = {"ok": True}
     await orch.begin()
@@ -121,6 +194,15 @@ async def test_max_surveys_limit_triggers_limit_reached(orch, bridge):
 
 @pytest.mark.asyncio
 async def test_failed_survey_recorded(orch, bridge):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_failed_survey_recorded
+    # PARAMETER: orch, bridge
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     bridge.return_value = {"ok": True}
     await orch.begin()
     await orch.on_survey_completed(success=False, steps_used=60, end_reason="max_steps")
@@ -131,6 +213,15 @@ async def test_failed_survey_recorded(orch, bridge):
 
 @pytest.mark.asyncio
 async def test_record_has_start_and_end_time(orch, bridge):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_record_has_start_and_end_time
+    # PARAMETER: orch, bridge
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     bridge.return_value = {"ok": True}
     await orch.begin()
     await orch.on_survey_completed(success=True, steps_used=12, end_reason="survey_done")
@@ -142,6 +233,15 @@ async def test_record_has_start_and_end_time(orch, bridge):
 
 
 def test_finalize_returns_stats(orch):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_finalize_returns_stats
+    # PARAMETER: orch
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     stats = orch.finalize()
     assert "attempted" in stats
     assert "completed" in stats
@@ -151,6 +251,15 @@ def test_finalize_returns_stats(orch):
 
 
 def test_stats_summary_empty_on_fresh_orchestrator(orch):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_stats_summary_empty_on_fresh_orchestrator
+    # PARAMETER: orch
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     stats = orch.stats_summary()
     assert stats["attempted"] == 0
     assert stats["completed"] == 0
@@ -159,6 +268,15 @@ def test_stats_summary_empty_on_fresh_orchestrator(orch):
 
 @pytest.mark.asyncio
 async def test_abort_sets_state(orch, bridge):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_abort_sets_state
+    # PARAMETER: orch, bridge
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     bridge.return_value = {"ok": True}
     await orch.begin()
     orch.abort("test reason")
@@ -167,6 +285,15 @@ async def test_abort_sets_state(orch, bridge):
 
 @pytest.mark.asyncio
 async def test_history_file_written_on_finalize(orch, bridge, tmp_history):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_history_file_written_on_finalize
+    # PARAMETER: orch, bridge, tmp_history
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     bridge.return_value = {"ok": True}
     await orch.begin()
     await orch.on_survey_completed(success=True, steps_used=5, end_reason="survey_done")

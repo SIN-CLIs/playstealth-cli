@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: bridge_retry.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 Retry-Wrapper mit Exponential Backoff fuer Bridge/MCP-Calls.
 
@@ -165,6 +175,15 @@ if __name__ == "__main__":
         calls = {"n": 0}
 
         async def fake_bridge(method: str, params: dict[str, Any] | None):
+    # -------------------------------------------------------------------------
+    # FUNKTION: fake_bridge
+    # PARAMETER: method: str, params: dict[str, Any] | None
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
             calls["n"] += 1
             if calls["n"] < 3:
                 return {"error": "timeout while navigating"}
@@ -182,6 +201,15 @@ if __name__ == "__main__":
 
         # Permanent error -> kein Retry
         async def perma(method, params):
+    # -------------------------------------------------------------------------
+    # FUNKTION: perma
+    # PARAMETER: method, params
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
             return {"error": "unauthorized"}
 
         res2 = await call_with_retry(perma, "x", max_attempts=5)

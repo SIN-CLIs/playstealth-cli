@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: survey_orchestrator.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -51,6 +61,13 @@ from typing import Any, Awaitable, Callable
 
 
 class QueueState(Enum):
+    # ========================================================================
+    # KLASSE: QueueState(Enum)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Alle möglichen Zustände der Survey-Queue."""
 
     IDLE = auto()
@@ -66,6 +83,13 @@ class QueueState(Enum):
 
 @dataclass
 class SurveyRecord:
+    # ========================================================================
+    # KLASSE: SurveyRecord
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Eine einzelne Survey-Durchführung."""
 
     index: int
@@ -108,6 +132,13 @@ BridgeCallable = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
 class SurveyOrchestrator:
+    # ========================================================================
+    # KLASSE: SurveyOrchestrator
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Koordiniert mehrere Surveys in einem einzigen Worker-Run.
 

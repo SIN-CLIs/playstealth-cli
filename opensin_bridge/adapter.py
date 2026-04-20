@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: adapter.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Bridge adapter -- contract-aware, idempotency-aware RPC client.
 
 Sits between the worker and the raw JSON-RPC transport (whatever
@@ -32,6 +42,13 @@ TraceSink = Callable[[dict[str, Any]], None]
 
 @dataclass
 class BridgeCallResult:
+    # ========================================================================
+    # KLASSE: BridgeCallResult
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     method: str
     ok: bool
     value: Any = None
@@ -43,6 +60,13 @@ class BridgeCallResult:
 
 
 class BridgeAdapter:
+    # ========================================================================
+    # KLASSE: BridgeAdapter
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Stateful bridge client. Instantiate one per worker session."""
 
     _EXPECTED_MAJOR = "1"

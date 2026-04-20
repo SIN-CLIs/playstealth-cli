@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_audio_handler.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 Unit-Tests für audio_handler.
@@ -30,10 +40,28 @@ from audio_handler import (
 
 
 def _run(coro):
+    # -------------------------------------------------------------------------
+    # FUNKTION: _run
+    # PARAMETER: coro
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     return asyncio.get_event_loop().run_until_complete(coro) if not asyncio.get_event_loop().is_running() else asyncio.run(coro)
 
 
 def test_prompt_block_empty_transcript():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_prompt_block_empty_transcript
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     t = AudioTranscript(
         transcript="",
         language="de",
@@ -47,6 +75,15 @@ def test_prompt_block_empty_transcript():
 
 
 def test_prompt_block_with_text():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_prompt_block_with_text
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     t = AudioTranscript(
         transcript="Kaufen Sie jetzt das neue Modell!",
         language="de",
@@ -62,6 +99,15 @@ def test_prompt_block_with_text():
 
 
 def test_prompt_block_with_error():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_prompt_block_with_error
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     t = AudioTranscript(
         transcript="",
         language="de",
@@ -77,6 +123,15 @@ def test_prompt_block_with_error():
 
 
 def test_mime_suffix_roundtrip():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_mime_suffix_roundtrip
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     for suffix, mime in (
         (".mp3", "audio/mpeg"),
         (".wav", "audio/wav"),
@@ -89,6 +144,15 @@ def test_mime_suffix_roundtrip():
 
 
 def test_estimate_duration_mp3():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_estimate_duration_mp3
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     # 1 MB MP3 @ 128 kbps ≈ 62.5 sec
     fake = b"\x00" * 1_000_000
     dur = _estimate_duration_seconds(fake, "audio/mpeg")
@@ -96,6 +160,15 @@ def test_estimate_duration_mp3():
 
 
 def test_estimate_duration_wav_much_shorter():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_estimate_duration_wav_much_shorter
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     fake = b"\x00" * 1_000_000
     mp3_dur = _estimate_duration_seconds(fake, "audio/mpeg")
     wav_dur = _estimate_duration_seconds(fake, "audio/wav")
@@ -103,6 +176,15 @@ def test_estimate_duration_wav_much_shorter():
 
 
 def test_download_audio_data_url(tmp_path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_download_audio_data_url
+    # PARAMETER: tmp_path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     payload = b"FAKEAUDIO"
     encoded = base64.b64encode(payload).decode("ascii")
     url = f"data:audio/mpeg;base64,{encoded}"
@@ -112,6 +194,15 @@ def test_download_audio_data_url(tmp_path):
 
 
 def test_download_audio_file_url(tmp_path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_download_audio_file_url
+    # PARAMETER: tmp_path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     f = tmp_path / "clip.wav"
     f.write_bytes(b"RIFFfakewavdata")
     raw, mime = _download_audio(f"file://{f}", max_bytes=1_000_000)
@@ -120,6 +211,15 @@ def test_download_audio_file_url(tmp_path):
 
 
 def test_download_audio_too_large(tmp_path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_download_audio_too_large
+    # PARAMETER: tmp_path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     f = tmp_path / "huge.mp3"
     f.write_bytes(b"X" * 10_000)
     try:
@@ -131,11 +231,29 @@ def test_download_audio_too_large(tmp_path):
 
 
 def test_average_confidence_empty():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_average_confidence_empty
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     assert _average_confidence([]) == 0.0
     assert _average_confidence(None) == 0.0
 
 
 def test_average_confidence_with_logprob():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_average_confidence_with_logprob
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     segs = [{"avg_logprob": -0.1}, {"avg_logprob": -0.2}]
     conf = _average_confidence(segs)
     # exp(-0.1)≈0.905, exp(-0.2)≈0.819, avg≈0.862
@@ -143,6 +261,15 @@ def test_average_confidence_with_logprob():
 
 
 def test_transcribe_without_api_key_returns_error():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_transcribe_without_api_key_returns_error
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     result = asyncio.run(
         transcribe_audio("https://example.com/a.mp3", nvidia_api_key="")
     )
@@ -152,6 +279,15 @@ def test_transcribe_without_api_key_returns_error():
 
 
 def test_transcribe_with_bad_url_returns_error():
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_transcribe_with_bad_url_returns_error
+    # PARAMETER: keine
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     # Verwendet einen nicht-existenten Host → Download-Fehler
     result = asyncio.run(
         transcribe_audio(

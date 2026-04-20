@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: budget_guard.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 Token- und Request-Budget-Circuit-Breaker.
 
@@ -64,6 +74,13 @@ def _cost_for_model(model: str) -> tuple[float, float]:
 
 @dataclass
 class BudgetState:
+    # ========================================================================
+    # KLASSE: BudgetState
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Laufende Zaehler fuer einen Run."""
 
     started_at: float = field(default_factory=time.time)
@@ -79,6 +96,13 @@ class BudgetState:
 
 
 class BudgetGuard:
+    # ========================================================================
+    # KLASSE: BudgetGuard
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Verwaltet Limits und Counter fuer einen Worker-Run.
 

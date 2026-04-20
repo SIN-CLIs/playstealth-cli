@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_heypiggy_vision_worker.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 import base64
 import importlib.util
 import json
@@ -15,7 +25,23 @@ SPEC.loader.exec_module(worker)
 
 
 class DummyGate:
+    # ========================================================================
+    # KLASSE: DummyGate
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def __init__(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: __init__
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         self.failed_selectors = []
         self.recorded = []
 
@@ -23,14 +49,48 @@ class DummyGate:
         return False
 
     def add_failed_selector(self, selector: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: add_failed_selector
+    # PARAMETER: self, selector: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         self.failed_selectors.append(selector)
 
     def record_step(self, verdict: str, img_hash: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: record_step
+    # PARAMETER: self, verdict: str, img_hash: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         self.recorded.append((verdict, img_hash))
 
 
 class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     async def test_main_stops_before_browser_mutation_when_credentials_missing(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_main_stops_before_browser_mutation_when_credentials_missing
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         execute_bridge = AsyncMock()
         check_bridge_alive = AsyncMock(return_value=True)
         run_vision_model = AsyncMock(
@@ -56,6 +116,15 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
         check_bridge_alive.assert_not_awaited()
 
     async def test_main_stops_before_browser_mutation_when_vision_auth_fails(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_main_stops_before_browser_mutation_when_vision_auth_fails
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         execute_bridge = AsyncMock()
 
         with (
@@ -87,6 +156,15 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
         execute_bridge.assert_not_awaited()
 
     async def test_main_stops_before_browser_mutation_when_vision_health_fails(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_main_stops_before_browser_mutation_when_vision_health_fails
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         execute_bridge = AsyncMock()
 
         with (
@@ -118,6 +196,15 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
         execute_bridge.assert_not_awaited()
 
     async def test_ask_vision_turns_auth_failure_into_stop(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_ask_vision_turns_auth_failure_into_stop
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with (
             patch.object(worker, "dom_prescan", AsyncMock(return_value="DOM")),
             patch.object(
@@ -141,6 +228,15 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["next_action"], "none")
 
     def test_detect_vision_auth_failure_treats_health_failures_as_blockers(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_detect_vision_auth_failure_treats_health_failures_as_blockers
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         blocker = worker.detect_vision_auth_failure(
             "provider health check failed: vision model unhealthy"
         )
@@ -149,7 +245,23 @@ class HeyPiggyWorkerPreflightTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HeyPiggyWorkerClickPipelineTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerClickPipelineTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     async def test_run_click_action_routes_click_ref_through_escalation_pipeline(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_run_click_action_routes_click_ref_through_escalation_pipeline
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = DummyGate()
         escalating_click = AsyncMock(return_value=True)
 
@@ -170,7 +282,23 @@ class HeyPiggyWorkerClickPipelineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HeyPiggyWorkerVisionTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerVisionTimeoutTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_cli_timeout_respects_full_requested_timeout(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cli_timeout_respects_full_requested_timeout
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Regression: Früher war cli_timeout auf 25s gecappt → JEDER Call starb."""
         # Direkt die Cap-Logik nachbilden wie in run_vision_model
         timeout = 180
@@ -182,7 +310,23 @@ class HeyPiggyWorkerVisionTimeoutTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HeyPiggyWorkerControllerTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerControllerTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_failed_selectors_reset_on_page_state_change(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_failed_selectors_reset_on_page_state_change
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """failed_selectors müssen bei Page-State-Wechsel geleert werden."""
         gate = worker.VisionGateController()
         gate.add_failed_selector("#bad")
@@ -197,6 +341,15 @@ class HeyPiggyWorkerControllerTests(unittest.TestCase):
         )
 
     def test_failed_selectors_require_three_failures_before_blocking(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_failed_selectors_require_three_failures_before_blocking
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Ein einzelner Fail darf den Selektor nicht sofort sperren."""
         gate = worker.VisionGateController()
         gate.add_failed_selector("#flaky")
@@ -208,7 +361,23 @@ class HeyPiggyWorkerControllerTests(unittest.TestCase):
 
 
 class HeyPiggyWorkerJsonParsingTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerJsonParsingTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     async def test_ask_vision_extracts_json_from_prose_wrapped_output(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_ask_vision_extracts_json_from_prose_wrapped_output
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Regression: Prosa um JSON herum darf nicht zu RETRY führen."""
         prosa_output = (
             "Ich analysiere den Screenshot. Hier meine Entscheidung:\n"
@@ -238,6 +407,15 @@ class HeyPiggyWorkerJsonParsingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["next_action"], "click_element")
 
     async def test_ask_vision_includes_fail_learning_context_in_prompt(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_ask_vision_includes_fail_learning_context_in_prompt
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         fake_runner = AsyncMock(
             return_value={
                 "ok": True,
@@ -271,12 +449,37 @@ class HeyPiggyWorkerJsonParsingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HeyPiggyWorkerProfilePathTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerProfilePathTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_profile_path_resolver_uses_env_override(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_profile_path_resolver_uses_env_override
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.dict(os.environ, {"HEYPIGGY_PROFILE_PATH": "/tmp/custom.json"}):
             path = worker._resolve_profile_path()
         self.assertEqual(str(path), "/tmp/custom.json")
 
     def test_profile_path_resolver_has_portable_fallback(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_profile_path_resolver_has_portable_fallback
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Darf nicht mehr hardcoded auf /Users/jeremy/ zeigen."""
         with patch.dict(os.environ, {}, clear=False):
             # Explizit alle relevanten Env-Vars entfernen
@@ -300,7 +503,23 @@ def _write_test_png() -> str:
 
 
 class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     async def test_nvidia_nim_returns_auth_failure_without_key(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_nvidia_nim_returns_auth_failure_without_key
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Ohne NVIDIA_API_KEY → klarer Auth-Failure, kein Crash."""
         with patch.object(worker, "NVIDIA_API_KEY", ""):
             result = await worker._nvidia_nim_chat(
@@ -314,6 +533,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NVIDIA_API_KEY", result["error"])
 
     async def test_nvidia_nim_parses_openai_compat_response(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_nvidia_nim_parses_openai_compat_response
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """NVIDIA NIM OpenAI-kompatible Response wird korrekt geparst."""
         tmp_path = _write_test_png()
         fake_response = json.dumps(
@@ -353,6 +581,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["model_used"], "meta/llama-3.2-90b-vision-instruct")
 
     async def test_nvidia_nim_handles_rate_limit_429(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_nvidia_nim_handles_rate_limit_429
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """429 Rate-Limit wird als retry-bar markiert, nicht als auth failure."""
         tmp_path = _write_test_png()
 
@@ -374,6 +611,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.get("rate_limited"))
 
     async def test_nvidia_nim_handles_401_as_auth_failure(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_nvidia_nim_handles_401_as_auth_failure
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """401 → auth_failure=True (Preflight stoppt Worker)."""
         tmp_path = _write_test_png()
         with (
@@ -393,6 +639,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["auth_failure"])
 
     async def test_run_vision_model_routes_to_nvidia_when_key_present(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_run_vision_model_routes_to_nvidia_when_key_present
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Mit NVIDIA_API_KEY + VISION_BACKEND=auto → NVIDIA-Pfad wird gewählt."""
         fake_nvidia = AsyncMock(
             return_value={
@@ -425,6 +680,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         fake_opencode.assert_not_called()
 
     async def test_run_vision_model_fallback_to_opencode_without_key(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_run_vision_model_fallback_to_opencode_without_key
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Ohne NVIDIA_API_KEY → OpenCode CLI Pfad (Backwards Compat)."""
         fake_nvidia = AsyncMock(return_value={"ok": True, "text": "X"})
         fake_opencode = AsyncMock(
@@ -444,6 +708,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         fake_nvidia.assert_not_called()
 
     async def test_run_vision_model_auto_without_key_falls_back_to_opencode(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_run_vision_model_auto_without_key_falls_back_to_opencode
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         fake_nvidia = AsyncMock(return_value={"ok": True, "text": "X"})
         fake_opencode = AsyncMock(
             return_value={"ok": True, "auth_failure": False, "text": "opencode-worked"}
@@ -463,6 +736,15 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
         fake_nvidia.assert_not_called()
 
     async def test_nvidia_fallback_chain_tries_next_model_on_error(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_nvidia_fallback_chain_tries_next_model_on_error
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Wenn das Primary-Modell 500ert, wird das nächste Modell probiert."""
         tmp_path = _write_test_png()
         calls = []
@@ -491,10 +773,35 @@ class HeyPiggyWorkerNvidiaNimTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HeyPiggyVisionCacheTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyVisionCacheTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def setUp(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: setUp
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         worker._VISION_CACHE.clear()
 
     def test_cache_returns_last_proceed_for_same_hash(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_returns_last_proceed_for_same_hash
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "page_state": "survey_active",
@@ -507,19 +814,55 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
         self.assertEqual(cached["verdict"], "PROCEED")
 
     def test_cache_rejects_retry_verdicts(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_rejects_retry_verdicts
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         worker._vision_cache_put(
             "hash123", "desc", 1, {"verdict": "RETRY", "reason": "blur"}
         )
         self.assertIsNone(worker._vision_cache_get("hash123", "desc", 2))
 
     def test_cache_ignores_missing_hash(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_ignores_missing_hash
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         self.assertIsNone(worker._vision_cache_get("", "desc", 1))
 
     def test_cache_different_action_misses(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_different_action_misses
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         worker._vision_cache_put("hash123", "click weiter", 1, {"verdict": "PROCEED"})
         self.assertIsNone(worker._vision_cache_get("hash123", "click andere", 2))
 
     def test_cache_bypasses_fragile_click_after_selector_fail_learning(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_bypasses_fragile_click_after_selector_fail_learning
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "next_action": "click_element",
@@ -537,6 +880,15 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
         self.assertIsNone(cached)
 
     def test_cache_keeps_stable_id_click_when_selector_fail_learning_exists(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_keeps_stable_id_click_when_selector_fail_learning_exists
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "next_action": "click_element",
@@ -557,6 +909,17 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
     def test_cache_does_not_store_fragile_click_when_selector_fail_learning_exists(
         self,
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_does_not_store_fragile_click_when_selector_fail_learning_exists
+    # PARAMETER: 
+        self,
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "next_action": "click_element",
@@ -573,6 +936,15 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
         self.assertEqual(worker._VISION_CACHE, {})
 
     def test_cache_does_not_store_click_actions_when_loop_learning_exists(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_does_not_store_click_actions_when_loop_learning_exists
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "next_action": "click_ref",
@@ -589,6 +961,15 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
         self.assertEqual(worker._VISION_CACHE, {})
 
     def test_cache_bypasses_selector_from_denylist(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_bypasses_selector_from_denylist
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "next_action": "ghost_click",
@@ -614,6 +995,15 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
         self.assertIsNone(cached)
 
     def test_cache_bypasses_action_signature_from_denylist(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_cache_bypasses_action_signature_from_denylist
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         decision = {
             "verdict": "PROCEED",
             "next_action": "click_ref",
@@ -641,7 +1031,23 @@ class HeyPiggyVisionCacheTests(unittest.TestCase):
 
 
 class HeyPiggyActionLoopDetectorTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyActionLoopDetectorTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_loop_detected_after_three_identical_actions(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_loop_detected_after_three_identical_actions
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         params = {"selector": "#btn"}
         self.assertFalse(gate.record_action("h1", "click_element", params))
@@ -649,12 +1055,30 @@ class HeyPiggyActionLoopDetectorTests(unittest.TestCase):
         self.assertTrue(gate.record_action("h1", "click_element", params))
 
     def test_varied_actions_do_not_trigger_loop(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_varied_actions_do_not_trigger_loop
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         self.assertFalse(gate.record_action("h1", "click_element", {"selector": "#a"}))
         self.assertFalse(gate.record_action("h1", "click_element", {"selector": "#b"}))
         self.assertFalse(gate.record_action("h1", "click_element", {"selector": "#c"}))
 
     def test_clear_action_history_resets_loop_detection(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_clear_action_history_resets_loop_detection
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         params = {"selector": "#btn"}
         gate.record_action("h1", "click_element", params)
@@ -665,6 +1089,15 @@ class HeyPiggyActionLoopDetectorTests(unittest.TestCase):
         self.assertFalse(gate.record_action("h1", "click_element", params))
 
     def test_action_history_resets_on_page_state_change(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_action_history_resets_on_page_state_change
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         params = {"selector": "#btn"}
         gate.record_action("h1", "click_element", params)
@@ -676,12 +1109,37 @@ class HeyPiggyActionLoopDetectorTests(unittest.TestCase):
 
 
 class HeyPiggyProfileAutofillTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyProfileAutofillTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_email_placeholder_still_works(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_email_placeholder_still_works
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         params = {"selector": "#email", "text": "<EMAIL>"}
         out = worker.inject_credentials(params, "jeremy@example.com", "pw")
         self.assertEqual(out["text"], "jeremy@example.com")
 
     def test_profile_placeholder_resolves_from_profile(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_profile_placeholder_resolves_from_profile
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.object(
             worker, "USER_PROFILE", {"name": "Jeremy Schulze", "city": "Berlin"}
         ):
@@ -690,6 +1148,15 @@ class HeyPiggyProfileAutofillTests(unittest.TestCase):
         self.assertEqual(out["text"], "Jeremy Schulze")
 
     def test_field_hint_autofill_when_placeholder_auto(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_field_hint_autofill_when_placeholder_auto
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Wenn text='<AUTO>' und Feldname eindeutig, ziehen wir aus dem Profil."""
         with patch.object(worker, "USER_PROFILE", {"city": "München"}):
             params = {"selector": "#input-city", "text": "<AUTO>"}
@@ -697,6 +1164,15 @@ class HeyPiggyProfileAutofillTests(unittest.TestCase):
         self.assertEqual(out["text"], "München")
 
     def test_no_autofill_if_user_text_present(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_no_autofill_if_user_text_present
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Wenn Vision bereits konkreten Text gegeben hat, nicht überschreiben."""
         with patch.object(worker, "USER_PROFILE", {"city": "München"}):
             params = {"selector": "#city", "text": "Hamburg"}
@@ -704,6 +1180,15 @@ class HeyPiggyProfileAutofillTests(unittest.TestCase):
         self.assertEqual(out["text"], "Hamburg")
 
     def test_resolve_profile_value_for_vorname(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_resolve_profile_value_for_vorname
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.object(worker, "USER_PROFILE", {"first_name": "Jeremy"}):
             self.assertEqual(
                 worker._resolve_profile_value("first-name-input"), "Jeremy"
@@ -711,12 +1196,37 @@ class HeyPiggyProfileAutofillTests(unittest.TestCase):
             self.assertEqual(worker._resolve_profile_value("vorname"), "Jeremy")
 
     def test_resolve_profile_value_returns_none_on_mismatch(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_resolve_profile_value_returns_none_on_mismatch
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.object(worker, "USER_PROFILE", {"city": "Berlin"}):
             self.assertIsNone(worker._resolve_profile_value("some-random-field"))
 
 
 class HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     async def test_run_fail_replay_analysis_writes_report_and_optional_comment(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_run_fail_replay_analysis_writes_report_and_optional_comment
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         frame = MagicMock()
         frame.png_bytes = b"frame-bytes"
         frame.step_label = "step_7_click"
@@ -779,6 +1289,15 @@ class HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         post_comment.assert_called_once()
 
     async def test_run_fail_replay_analysis_persists_fail_learning_memory(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_run_fail_replay_analysis_persists_fail_learning_memory
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         frame = MagicMock()
         frame.png_bytes = b"frame-bytes"
         frame.step_label = "step_8_click"
@@ -833,7 +1352,23 @@ class HeyPiggyFailReplayIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyFailLearningMemoryTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_build_fail_learning_context_includes_recent_mitigation_hints(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_build_fail_learning_context_includes_recent_mitigation_hints
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         memory = {
             "recent_failures": [
                 {
@@ -852,6 +1387,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertIn("VERMEIDE dieselbe next_action", context)
 
     def test_build_fail_learning_context_contains_explicit_action_avoidance_rules(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_build_fail_learning_context_contains_explicit_action_avoidance_rules
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         memory = {
             "recent_failures": [
                 {
@@ -884,6 +1428,17 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
     def test_remember_fail_learning_persists_selector_action_and_keyword_denylists(
         self,
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_remember_fail_learning_persists_selector_action_and_keyword_denylists
+    # PARAMETER: 
+        self,
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         gate.failed_selectors = {"#bad-selector": 3}
         gate.action_history = [
@@ -911,6 +1466,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
             self.assertIn("captcha", denylist["root_cause_keywords"])
 
     def test_apply_fail_learning_to_decision_blocks_selector_from_denylist(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_apply_fail_learning_to_decision_blocks_selector_from_denylist
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         decision = {
             "verdict": "PROCEED",
@@ -940,6 +1504,17 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
     def test_apply_fail_learning_to_decision_blocks_action_signature_from_denylist(
         self,
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_apply_fail_learning_to_decision_blocks_action_signature_from_denylist
+    # PARAMETER: 
+        self,
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         decision = {
             "verdict": "PROCEED",
@@ -968,6 +1543,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertEqual(adapted["next_action"], "none")
 
     def test_apply_fail_learning_to_decision_blocks_fragile_click_on_keyword_risk(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_apply_fail_learning_to_decision_blocks_fragile_click_on_keyword_risk
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         decision = {
             "verdict": "PROCEED",
@@ -995,6 +1579,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertEqual(adapted["next_action"], "none")
 
     def test_get_fail_learning_delay_bounds_expands_after_timing_failures(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_get_fail_learning_delay_bounds_expands_after_timing_failures
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.object(
             worker,
             "load_fail_learning",
@@ -1005,6 +1598,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertEqual((delay_min, delay_max), (6.0, 12.0))
 
     def test_get_fail_learning_delay_bounds_stays_default_without_timing_failures(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_get_fail_learning_delay_bounds_stays_default_without_timing_failures
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.object(
             worker,
             "load_fail_learning",
@@ -1015,6 +1617,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertEqual((delay_min, delay_max), (5.0, 10.0))
 
     def test_get_fail_learning_dom_wait_seconds_expands_after_timing_failures(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_get_fail_learning_dom_wait_seconds_expands_after_timing_failures
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.object(
             worker,
             "load_fail_learning",
@@ -1025,6 +1636,17 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
     def test_apply_fail_learning_to_decision_prefers_click_ref_after_selector_issues(
         self,
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_apply_fail_learning_to_decision_prefers_click_ref_after_selector_issues
+    # PARAMETER: 
+        self,
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         decision = {
             "verdict": "PROCEED",
@@ -1044,6 +1666,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertEqual(adapted["next_params"], {"ref": "@e9"})
 
     def test_apply_fail_learning_to_decision_prefers_ghost_click_for_id_selector(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_apply_fail_learning_to_decision_prefers_ghost_click_for_id_selector
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         decision = {
             "verdict": "PROCEED",
@@ -1063,6 +1694,15 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
         self.assertEqual(adapted["next_params"], {"selector": "#submit-button"})
 
     def test_apply_fail_learning_to_decision_blocks_known_loop_pattern(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_apply_fail_learning_to_decision_blocks_known_loop_pattern
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         gate = worker.VisionGateController()
         decision = {
             "verdict": "PROCEED",
@@ -1088,7 +1728,23 @@ class HeyPiggyFailLearningMemoryTests(unittest.TestCase):
 
 
 class HeyPiggyFinalizeWorkerRunTests(unittest.IsolatedAsyncioTestCase):
+    # ========================================================================
+    # KLASSE: HeyPiggyFinalizeWorkerRunTests(unittest.IsolatedAsyncioTestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     async def test_finalize_worker_run_skips_fail_replay_for_success(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_finalize_worker_run_skips_fail_replay_for_success
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         run_summary = worker.RunSummary(run_id="run-success")
         gate = worker.VisionGateController()
         recorder = MagicMock()
@@ -1125,6 +1781,15 @@ class HeyPiggyFinalizeWorkerRunTests(unittest.IsolatedAsyncioTestCase):
         fail_replay.assert_not_awaited()
 
     async def test_finalize_worker_run_triggers_fail_replay_for_limit_exit(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_finalize_worker_run_triggers_fail_replay_for_limit_exit
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         run_summary = worker.RunSummary(run_id="run-limit")
         gate = worker.VisionGateController()
         gate.no_progress_count = worker.MAX_NO_PROGRESS

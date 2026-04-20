@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: harness.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Validation harness for bridge + worker contract parity."""
 
 from __future__ import annotations
@@ -12,6 +22,13 @@ from opensin_bridge.contract import METHODS, BRIDGE_CONTRACT_VERSION
 
 @dataclass
 class ValidationReport:
+    # ========================================================================
+    # KLASSE: ValidationReport
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     ok: bool
     checks: list[dict[str, Any]] = field(default_factory=list)
 
@@ -20,6 +37,13 @@ class ValidationReport:
 
 
 class ValidationHarness:
+    # ========================================================================
+    # KLASSE: ValidationHarness
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Static and live checks for bridge parity."""
 
     def __init__(self, *, bridge_contract_path: pathlib.Path | None = None) -> None:

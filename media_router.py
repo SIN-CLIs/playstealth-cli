@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: media_router.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -140,6 +150,13 @@ DETECT_MEDIA_JS = r"""
 
 @dataclass(frozen=True)
 class MediaSnapshot:
+    # ========================================================================
+    # KLASSE: MediaSnapshot
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Zusammenfassung aller Media-Elemente die der Router gefunden hat."""
 
     audio_urls: tuple[str, ...] = ()
@@ -169,6 +186,13 @@ class MediaSnapshot:
 
 @dataclass(frozen=True)
 class MediaAnalysis:
+    # ========================================================================
+    # KLASSE: MediaAnalysis
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Vollständiges Analyse-Ergebnis nach Download + Verarbeitung."""
 
     snapshot: MediaSnapshot
@@ -232,6 +256,13 @@ BridgeCallable = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
 class MediaRouter:
+    # ========================================================================
+    # KLASSE: MediaRouter
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Erkennt Media-Elemente auf der aktuellen Seite und dispatcht zur Analyse.
 

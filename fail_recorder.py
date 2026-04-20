@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: fail_recorder.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -37,6 +47,13 @@ class RecordedFrame:
 
 
 class ScreenRingRecorder:
+    # ========================================================================
+    # KLASSE: ScreenRingRecorder
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Nimmt Screenshots auf und hält die letzten N Sekunden als Ring-Buffer.
     WHY: Ring-Buffer stellt sicher dass wir nie mehr als nötig speichern.
@@ -63,6 +80,15 @@ class ScreenRingRecorder:
         self._consecutive_capture_fails = 0
 
     async def start(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: start
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Startet den Ring-Buffer-Recorder als Background-Task.
         WHY: Muss async laufen damit der Worker-Hauptloop nicht blockiert wird.
@@ -89,6 +115,15 @@ class ScreenRingRecorder:
             self._task = None
 
     async def _record_loop(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: _record_loop
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Hauptloop: nimmt alle 1/fps Sekunden einen Screenshot auf.
         WHY: Kontinuierliche Aufnahme damit bei Fail immer Kontext da ist.
@@ -157,6 +192,20 @@ class ScreenRingRecorder:
         verdict: str = "",
         page_state: str = "",
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: annotate_last_frame
+    # PARAMETER: 
+        self,
+        step_label: str,
+        verdict: str = "",
+        page_state: str = "",
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Annotiert den letzten Frame mit Step-Kontext.
         WHY: Ohne Annotation weiß die Video-Analyse nicht welcher Step welcher Frame war.

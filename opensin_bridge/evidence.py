@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: evidence.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Evidence bundle helper -- issue #70 (worker side).
 
 Calls ``bridge.evidenceBundle`` on the Chrome extension and writes the
@@ -18,6 +28,13 @@ from opensin_bridge.adapter import BridgeAdapter
 
 @dataclass
 class EvidenceBundle:
+    # ========================================================================
+    # KLASSE: EvidenceBundle
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     trace_id: str
     path: pathlib.Path
     payload: dict[str, Any]

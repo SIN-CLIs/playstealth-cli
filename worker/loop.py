@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: loop.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Worker orchestration loop.
 
 High-level coroutine that wires together the legacy :mod:`heypiggy_vision_worker`

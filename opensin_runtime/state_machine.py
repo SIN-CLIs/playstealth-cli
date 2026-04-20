@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: state_machine.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Deterministic worker state machine.
 
 State graph::
@@ -67,7 +77,23 @@ _ALLOWED: dict[RuntimeState, set[RuntimeState]] = {
 
 
 class IllegalTransition(RuntimeError):
+    # ========================================================================
+    # KLASSE: IllegalTransition(RuntimeError)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def __init__(self, src: RuntimeState, dst: RuntimeState):
+    # -------------------------------------------------------------------------
+    # FUNKTION: __init__
+    # PARAMETER: self, src: RuntimeState, dst: RuntimeState
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         super().__init__(f"illegal transition {src.value} -> {dst.value}")
         self.src = src
         self.dst = dst
@@ -75,6 +101,13 @@ class IllegalTransition(RuntimeError):
 
 @dataclass
 class StateTransition:
+    # ========================================================================
+    # KLASSE: StateTransition
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     seq: int
     src: RuntimeState
     dst: RuntimeState
@@ -84,6 +117,13 @@ class StateTransition:
 
 
 class StateMachine:
+    # ========================================================================
+    # KLASSE: StateMachine
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def __init__(self, *, on_transition: Callable[[StateTransition], None] | None = None) -> None:
         self._state = RuntimeState.IDLE
         self._seq = 0

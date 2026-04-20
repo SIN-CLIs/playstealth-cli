@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: checkpoints.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 from __future__ import annotations
 
 import json
@@ -13,10 +23,24 @@ from pathlib import Path
 
 
 class IllegalTransitionError(RuntimeError):
+    # ========================================================================
+    # KLASSE: IllegalTransitionError(RuntimeError)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     pass
 
 
 class AgentState(str, Enum):
+    # ========================================================================
+    # KLASSE: AgentState(str, Enum)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     INIT = "INIT"
     PREFLIGHT = "PREFLIGHT"
     OPEN_LOGIN = "OPEN_LOGIN"
@@ -66,6 +90,13 @@ TRANSITION_TABLE: dict[AgentState, tuple[AgentState, ...]] = {
 
 @dataclass(slots=True)
 class StepContext:
+    # ========================================================================
+    # KLASSE: StepContext
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     run_id: str
     state: AgentState
     step_index: int = 0
@@ -82,6 +113,13 @@ class StepContext:
 
 @dataclass(slots=True)
 class ArchivedRun:
+    # ========================================================================
+    # KLASSE: ArchivedRun
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     run_id: str
     earnings: float
     duration_seconds: float

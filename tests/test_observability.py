@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_observability.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 import io
 import json
 import tempfile
@@ -12,7 +22,23 @@ from observability import RunSummary
 
 
 class RunSummaryStepTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: RunSummaryStepTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_record_step_updates_step_counters_consistently(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_record_step_updates_step_counters_consistently
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-1", start_time=10.0)
 
         with patch("observability.time.time", side_effect=[11.0, 12.0, 13.0]):
@@ -38,6 +64,17 @@ class RunSummaryStepTests(unittest.TestCase):
     def test_record_step_counts_explicit_unsuccessful_step_even_without_stop_verdict(
         self,
     ):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_record_step_counts_explicit_unsuccessful_step_even_without_stop_verdict
+    # PARAMETER: 
+        self,
+    
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-2", start_time=10.0)
 
         with patch("observability.time.time", return_value=11.0):
@@ -58,7 +95,23 @@ class RunSummaryStepTests(unittest.TestCase):
 
 
 class RunSummaryAggregationTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: RunSummaryAggregationTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_duration_success_rate_and_average_timings_are_computed(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_duration_success_rate_and_average_timings_are_computed
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-3", start_time=100.0)
 
         with patch("observability.time.time", side_effect=[101.0, 102.0]):
@@ -83,6 +136,15 @@ class RunSummaryAggregationTests(unittest.TestCase):
         self.assertEqual(summary.final_page_state, "dashboard")
 
     def test_zero_step_summary_reports_zero_rates(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_zero_step_summary_reports_zero_rates
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-empty", start_time=200.0)
 
         self.assertEqual(summary.success_rate, 0.0)
@@ -91,7 +153,23 @@ class RunSummaryAggregationTests(unittest.TestCase):
 
 
 class RunSummarySerializationTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: RunSummarySerializationTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_to_dict_without_steps_excludes_step_payload(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_to_dict_without_steps_excludes_step_payload
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-4", start_time=50.0)
 
         with patch("observability.time.time", return_value=51.0):
@@ -106,6 +184,15 @@ class RunSummarySerializationTests(unittest.TestCase):
         self.assertEqual(data["total_steps"], 1)
 
     def test_to_dict_with_steps_serializes_step_metrics(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_to_dict_with_steps_serializes_step_metrics
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-5", start_time=50.0)
 
         with patch("observability.time.time", return_value=51.0):
@@ -132,6 +219,15 @@ class RunSummarySerializationTests(unittest.TestCase):
         self.assertEqual(steps[0]["duration"], 0.457)
 
     def test_save_to_file_writes_json_payload_to_disk(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_save_to_file_writes_json_payload_to_disk
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-6", start_time=10.0)
 
         with patch("observability.time.time", return_value=11.0):
@@ -154,6 +250,15 @@ class RunSummarySerializationTests(unittest.TestCase):
             self.assertEqual(len(saved_steps), 1)
 
     def test_print_summary_emits_human_readable_console_output(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_print_summary_emits_human_readable_console_output
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         summary = RunSummary(run_id="run-7", start_time=0.0)
         summary.total_steps = 4
         summary.successful_steps = 2

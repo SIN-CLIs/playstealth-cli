@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: exceptions.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Typed exception hierarchy for the HeyPiggy Vision Worker.
 
 The legacy worker caught ``Exception`` in 34+ places, which swallowed bugs
@@ -55,6 +65,13 @@ class WorkerError(Exception):
 
 
 class ConfigurationError(WorkerError):
+    # ========================================================================
+    # KLASSE: ConfigurationError(WorkerError)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Required configuration is missing or invalid."""
 
 
@@ -138,6 +155,13 @@ class ActionBlockedError(ActionError):
 
 
 class SitepackValidationError(ActionError):
+    # ========================================================================
+    # KLASSE: SitepackValidationError(ActionError)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """The sitepack payload failed structural validation.
 
     Raised when the JSON is not an object, required top-level keys are

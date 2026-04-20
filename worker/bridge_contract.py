@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: bridge_contract.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 from __future__ import annotations
 
 import json
@@ -15,6 +25,13 @@ _log = get_logger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class BridgeRequest:
+    # ========================================================================
+    # KLASSE: BridgeRequest
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     method: str
     params: dict[str, object] = field(default_factory=dict)
     page_fingerprint: str = ""
@@ -35,6 +52,13 @@ class BridgeRequest:
 
 @dataclass(slots=True, frozen=True)
 class BridgeResponse:
+    # ========================================================================
+    # KLASSE: BridgeResponse
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     ok: bool
     result: object
     error: str = ""

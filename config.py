@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: config.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -47,6 +57,13 @@ class BridgeConfig:
 
 @dataclass(frozen=True)
 class VisionConfig:
+    # ========================================================================
+    # KLASSE: VisionConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Vision-Model-Konfiguration (Legacy-Switch).
     WHY: `model` ist nur relevant falls VISION_BACKEND auf einen externen
@@ -68,6 +85,13 @@ class VisionConfig:
 
 @dataclass(frozen=True)
 class NvidiaConfig:
+    # ========================================================================
+    # KLASSE: NvidiaConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     NVIDIA NIM API Konfiguration.
     WHY: API-Key, Modell-IDs und Fallback-Kette müssen konfigurierbar sein.
@@ -101,6 +125,13 @@ class NvidiaConfig:
 
 @dataclass(frozen=True)
 class MediaConfig:
+    # ========================================================================
+    # KLASSE: MediaConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Multi-Modal Media-Pipeline Konfiguration (Audio / Video / Bilder).
     WHY: Umfragen enthalten häufig <audio>/<video>/<img>-Fragen. Wir müssen
@@ -130,6 +161,13 @@ class MediaConfig:
 
 @dataclass(frozen=True)
 class QueueConfig:
+    # ========================================================================
+    # KLASSE: QueueConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Multi-Survey Queue Konfiguration.
     WHY: Der Worker soll beliebig viele Surveys am Stück erledigen können.
@@ -146,6 +184,13 @@ class QueueConfig:
 
 @dataclass(frozen=True)
 class PersonaConfig:
+    # ========================================================================
+    # KLASSE: PersonaConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Persona + Global-Brain-Konfiguration — Wahrheits-Backbone des Workers.
 
@@ -170,6 +215,13 @@ class PersonaConfig:
 
 @dataclass(frozen=True)
 class RecorderConfig:
+    # ========================================================================
+    # KLASSE: RecorderConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Fail-Replay Recorder Konfiguration.
     WHY: FPS und Buffer-Dauer sind Tradeoffs zwischen RAM und Abdeckung.
@@ -211,6 +263,15 @@ class ArtifactConfig:
         return self.artifact_dir / "sessions"
 
     def ensure_dirs(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: ensure_dirs
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """Erstellt alle Artefakt-Verzeichnisse."""
         for d in [
             self.artifact_dir,
@@ -223,6 +284,13 @@ class ArtifactConfig:
 
 @dataclass(frozen=True)
 class WorkerConfig:
+    # ========================================================================
+    # KLASSE: WorkerConfig
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Gesamt-Konfiguration für den HeyPiggy Vision Worker.
     WHY: Einzelner Entry-Point für die gesamte Worker-Konfiguration.

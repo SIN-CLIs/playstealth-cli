@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_config.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 import os
 import tempfile
 import unittest
@@ -16,7 +26,23 @@ from config import (
 
 
 class WorkerConfigTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: WorkerConfigTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_worker_config_uses_typed_nested_defaults(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_worker_config_uses_typed_nested_defaults
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         cfg = WorkerConfig()
 
         self.assertIsInstance(cfg.bridge, BridgeConfig)
@@ -35,6 +61,15 @@ class WorkerConfigTests(unittest.TestCase):
         self.assertIn("vision_click", cfg.click_actions)
 
     def test_config_objects_are_frozen_against_runtime_mutation(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_config_objects_are_frozen_against_runtime_mutation
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         cfg = WorkerConfig()
 
         with self.assertRaises(FrozenInstanceError):
@@ -45,7 +80,23 @@ class WorkerConfigTests(unittest.TestCase):
 
 
 class ArtifactConfigTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: ArtifactConfigTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_artifact_paths_are_derived_from_run_id(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_artifact_paths_are_derived_from_run_id
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         cfg = ArtifactConfig(run_id="run-123", base_dir="/tmp/heypiggy")
 
         self.assertEqual(cfg.artifact_dir, Path("/tmp/heypiggy/heypiggy_run_run-123"))
@@ -60,6 +111,15 @@ class ArtifactConfigTests(unittest.TestCase):
         )
 
     def test_ensure_dirs_creates_complete_directory_tree(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_ensure_dirs_creates_complete_directory_tree
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = ArtifactConfig(run_id="run-456", base_dir=tmpdir)
 
@@ -72,7 +132,23 @@ class ArtifactConfigTests(unittest.TestCase):
 
 
 class LoadConfigFromEnvTests(unittest.TestCase):
+    # ========================================================================
+    # KLASSE: LoadConfigFromEnvTests(unittest.TestCase)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_load_config_from_env_uses_defaults_when_env_missing(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_load_config_from_env_uses_defaults_when_env_missing
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.dict(os.environ, {}, clear=True):
             cfg = load_config_from_env()
 
@@ -86,6 +162,15 @@ class LoadConfigFromEnvTests(unittest.TestCase):
         self.assertTrue(cfg.artifacts.run_id)
 
     def test_load_config_from_env_applies_overrides_and_type_casts(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_load_config_from_env_applies_overrides_and_type_casts
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         with patch.dict(
             os.environ,
             {

@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: context.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Worker execution context — the DI container that replaced the globals.
 
 The legacy worker carried 32 module-level globals and 13 ``global`` statements
@@ -64,6 +74,13 @@ def current_context() -> WorkerContext:
 
 @dataclass(slots=True)
 class BridgeState:
+    # ========================================================================
+    # KLASSE: BridgeState
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Mutable bridge identifiers, rebound on every tab/window switch."""
 
     tab_id: int | None = None
@@ -129,6 +146,13 @@ class ArtifactPaths:
 
 @dataclass(slots=True)
 class WorkerContext:
+    # ========================================================================
+    # KLASSE: WorkerContext
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Everything a running worker needs to hand-off between subsystems.
 
     One instance exists per process. Enter it as a context manager so it

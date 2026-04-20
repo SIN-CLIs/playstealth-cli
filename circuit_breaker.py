@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: circuit_breaker.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -88,6 +98,15 @@ class CircuitBreaker:
         return True
 
     def record_success(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: record_success
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Meldet einen erfolgreichen API-Call.
         WHY: Bei Erfolg im HALF_OPEN-State → Circuit schließen (API ist wieder da).
@@ -116,6 +135,15 @@ class CircuitBreaker:
             self.state = CircuitState.OPEN
 
     def reset(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: reset
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """
         Setzt den Circuit Breaker komplett zurück.
         WHY: Für Tests und manuelle Recovery nützlich.

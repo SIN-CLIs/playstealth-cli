@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# ================================================================================
+# DATEI: test_fail_recorder.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 # -*- coding: utf-8 -*-
 """
 ================================================================================
@@ -40,6 +50,15 @@ def _make_frame(ts: float, label: str = "", verdict: str = "") -> RecordedFrame:
 
 
 def _fill_recorder(recorder: ScreenRingRecorder, count: int, start_ts: float = 1000.0):
+    # -------------------------------------------------------------------------
+    # FUNKTION: _fill_recorder
+    # PARAMETER: recorder: ScreenRingRecorder, count: int, start_ts: float = 1000.0
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
     """Füllt den Recorder-Buffer direkt (ohne async capture)."""
     for i in range(count):
         recorder._frames.append(_make_frame(start_ts + i, f"step_{i}", "PROCEED"))
@@ -51,6 +70,13 @@ def _fill_recorder(recorder: ScreenRingRecorder, count: int, start_ts: float = 1
 
 
 class TestRecordedFrame:
+    # ========================================================================
+    # KLASSE: TestRecordedFrame
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für die RecordedFrame Dataclass."""
 
     def test_default_fields(self):
@@ -82,6 +108,13 @@ class TestRecordedFrame:
 
 
 class TestScreenRingRecorder:
+    # ========================================================================
+    # KLASSE: TestScreenRingRecorder
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für den ScreenRingRecorder Ring-Buffer."""
 
     def test_init_defaults(self):
@@ -148,6 +181,15 @@ class TestScreenRingRecorder:
         assert last.page_state == "survey_active"
 
     def test_annotate_empty_buffer_no_crash(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_annotate_empty_buffer_no_crash
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Annotation auf leerem Buffer darf nicht crashen."""
         rec = ScreenRingRecorder()
         rec.annotate_last_frame("test", "PROCEED")  # Muss stillschweigend nichts tun.
@@ -168,6 +210,15 @@ class TestScreenRingRecorder:
     # ---- KEYFRAMES ----
 
     def test_get_keyframes_empty(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_get_keyframes_empty
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Leerer Buffer muss leere Liste zurückgeben."""
         rec = ScreenRingRecorder()
         assert rec.get_keyframes() == []
@@ -201,6 +252,15 @@ class TestScreenRingRecorder:
         assert kf[-1].timestamp > 100
 
     def test_get_last_n_frames(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_get_last_n_frames
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: get_last_n_frames muss die chronologisch letzten N Frames liefern."""
         rec = ScreenRingRecorder()
         _fill_recorder(rec, 20, start_ts=100)
@@ -210,6 +270,15 @@ class TestScreenRingRecorder:
         assert last5[-1].timestamp == 119.0
 
     def test_get_last_n_frames_fewer_available(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_get_last_n_frames_fewer_available
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Wenn weniger als N Frames da sind, alle zurückgeben."""
         rec = ScreenRingRecorder()
         _fill_recorder(rec, 3)
@@ -220,6 +289,15 @@ class TestScreenRingRecorder:
 
     @pytest.mark.asyncio
     async def test_start_stop(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_start_stop
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: start() und stop() müssen ohne Fehler funktionieren."""
         rec = ScreenRingRecorder(fps=10.0)
         # Mock die Capture-Methode damit kein echter Screenshot gemacht wird
@@ -236,6 +314,15 @@ class TestScreenRingRecorder:
 
     @pytest.mark.asyncio
     async def test_double_start_no_duplicate_task(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_double_start_no_duplicate_task
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Zweimal start() darf keinen zweiten Task erzeugen."""
         rec = ScreenRingRecorder()
         rec._capture_frame = AsyncMock(return_value=b"\x89PNG")
@@ -248,6 +335,15 @@ class TestScreenRingRecorder:
 
     @pytest.mark.asyncio
     async def test_capture_failure_does_not_crash(self):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_capture_failure_does_not_crash
+    # PARAMETER: self
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Capture-Fehler dürfen den Recorder nie crashen."""
         rec = ScreenRingRecorder(fps=10.0)
         rec._capture_frame = AsyncMock(return_value=None)  # Simuliert Fehler
@@ -264,6 +360,13 @@ class TestScreenRingRecorder:
 
 
 class TestSaveKeyframesToDisk:
+    # ========================================================================
+    # KLASSE: TestSaveKeyframesToDisk
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Tests für die Disk-Speicherung von Keyframes."""
 
     def test_saves_frames(self, tmp_path: Path):
@@ -277,6 +380,15 @@ class TestSaveKeyframesToDisk:
             assert p.stat().st_size > 0
 
     def test_creates_directory(self, tmp_path: Path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_creates_directory
+    # PARAMETER: self, tmp_path: Path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Nicht existierende Verzeichnisse müssen automatisch erstellt werden."""
         deep_dir = tmp_path / "a" / "b" / "c"
         frames = [_make_frame(1, "test")]
@@ -285,6 +397,15 @@ class TestSaveKeyframesToDisk:
         assert len(paths) == 1
 
     def test_empty_keyframes(self, tmp_path: Path):
+    # -------------------------------------------------------------------------
+    # FUNKTION: test_empty_keyframes
+    # PARAMETER: self, tmp_path: Path
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         """WHY: Leere Keyframe-Liste muss leere Pfad-Liste zurückgeben."""
         paths = save_keyframes_to_disk([], tmp_path)
         assert paths == []

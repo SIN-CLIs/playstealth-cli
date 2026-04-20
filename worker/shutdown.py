@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: shutdown.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Cooperative, signal-driven graceful shutdown.
 
 The legacy worker had no signal handling — SIGTERM from Kubernetes killed
@@ -42,6 +52,13 @@ _HANDLED_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM) +
 
 
 class ShutdownController:
+    # ========================================================================
+    # KLASSE: ShutdownController
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Async context manager that installs graceful-shutdown signal handlers.
 
     Thread-safe across the single event-loop thread — not meant for

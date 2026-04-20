@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: contract.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Bridge contract v1 -- mirror of OpenSIN-Bridge/extension/src/contract/v1."""
 
 from __future__ import annotations
@@ -13,6 +23,13 @@ RetryHint = Literal["retry", "retry-after-refresh", "retry-after-reauth", "abort
 
 @dataclass(frozen=True)
 class BridgeMethod:
+    # ========================================================================
+    # KLASSE: BridgeMethod
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     name: str
     category: str
     idempotent: bool
@@ -124,6 +141,13 @@ ERROR_CODES: tuple[str, ...] = (
 
 
 class BridgeError(Exception):
+    # ========================================================================
+    # KLASSE: BridgeError(Exception)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Canonical bridge error. Mirrors the JS ``BridgeError`` class."""
 
     def __init__(self, code: str, message: str, *, retry_hint: RetryHint = "abort", data: dict | None = None):
@@ -139,7 +163,23 @@ class BridgeError(Exception):
 
 
 class ContractMismatch(BridgeError):
+    # ========================================================================
+    # KLASSE: ContractMismatch(BridgeError)
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def __init__(self, expected: str, got: str):
+    # -------------------------------------------------------------------------
+    # FUNKTION: __init__
+    # PARAMETER: self, expected: str, got: str
+    # ZWECK: 
+    # WAS PASSIERT HIER: 
+    # WARUM DIESER WEG: 
+    # ACHTUNG: 
+    # -------------------------------------------------------------------------
+    
         super().__init__(
             "CONTRACT_MISMATCH",
             f"bridge contract major mismatch: expected {expected}, got {got}",

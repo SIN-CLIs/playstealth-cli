@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: test_persona_trap_integration.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 Integrationstests fuer Persona + Trap-Detection + Konsistenz-Log.
 
@@ -74,6 +84,13 @@ def jeremy(tmp_path: Path) -> Persona:
 
 
 class TestPrequalificationAnswers:
+    # ========================================================================
+    # KLASSE: TestPrequalificationAnswers
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_age_from_dob_matches_bracket(self, jeremy: Persona) -> None:
         """Alters-Bracket muss aus DoB berechnet werden, nicht geraten.
 
@@ -130,6 +147,13 @@ class TestPrequalificationAnswers:
 
 
 class TestConsistencyTrap:
+    # ========================================================================
+    # KLASSE: TestConsistencyTrap
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_identical_question_matches(self, tmp_path: Path) -> None:
         log = AnswerLog(username="u", log_path=tmp_path / "hist.jsonl")
         log.record("Wie alt sind Sie?", "34", topic="age", confidence="high")
@@ -165,6 +189,13 @@ class TestConsistencyTrap:
 
 
 class TestTopicDetection:
+    # ========================================================================
+    # KLASSE: TestTopicDetection
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     @pytest.mark.parametrize(
         "question,expected_topic",
         [
@@ -188,6 +219,13 @@ class TestTopicDetection:
 
 
 class TestPersonaPromptBlock:
+    # ========================================================================
+    # KLASSE: TestPersonaPromptBlock
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_block_contains_hard_facts(self, jeremy: Persona) -> None:
         block = build_persona_prompt_block(jeremy)
         assert "Jeremy Schulze" in block
@@ -216,6 +254,13 @@ class TestPersonaPromptBlock:
 
 
 class TestIncomeBracket:
+    # ========================================================================
+    # KLASSE: TestIncomeBracket
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def test_income_bracket_matched(self, jeremy: Persona) -> None:
         # Jeremy: income_yearly_gross_eur = 55000
         result = resolve_answer(

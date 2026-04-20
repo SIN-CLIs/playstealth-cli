@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: panels.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Panel plugin loader -- issue #75.
 
 Plugins live in ``panels/<name>/plugin.py`` and expose a ``Panel`` class
@@ -24,6 +34,13 @@ class Panel(Protocol):
 
 @dataclass
 class PanelRegistry:
+    # ========================================================================
+    # KLASSE: PanelRegistry
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     panels: list[Panel] = field(default_factory=list)
 
     def resolve(self, url: str) -> Panel | None:

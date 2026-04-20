@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: strategy.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Pluggable stealth strategies.
 
 A strategy owns two decisions:
@@ -24,6 +34,13 @@ class StealthStrategy(Protocol):
 
 @dataclass
 class PassiveStrategy:
+    # ========================================================================
+    # KLASSE: PassiveStrategy
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Does nothing. Baseline for tests and non-hostile sites."""
 
     name: str = "passive"
@@ -39,6 +56,13 @@ class PassiveStrategy:
 
 @dataclass
 class HumanizedStrategy:
+    # ========================================================================
+    # KLASSE: HumanizedStrategy
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """Adds small random delays + verifies stealth.assess coherence score."""
 
     name: str = "humanized"

@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: engine.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """Interaction primitives with deterministic retry + verification.
 
 Each primitive:
@@ -25,6 +35,13 @@ from opensin_bridge.contract import BridgeError
 
 @dataclass
 class ActionPlan:
+    # ========================================================================
+    # KLASSE: ActionPlan
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     verb: str  # "click" | "type" | "scroll" | "select"
     target_key: str  # aria label | role+name | test-id ...
     value: str | None = None
@@ -36,6 +53,13 @@ class ActionPlan:
 
 @dataclass
 class ActionResult:
+    # ========================================================================
+    # KLASSE: ActionResult
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     ok: bool
     plan: ActionPlan
     attempts: int
@@ -44,6 +68,13 @@ class ActionResult:
 
 
 class InteractionEngine:
+    # ========================================================================
+    # KLASSE: InteractionEngine
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     def __init__(self, bridge: BridgeAdapter) -> None:
         self._bridge = bridge
 

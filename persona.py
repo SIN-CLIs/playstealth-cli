@@ -1,3 +1,13 @@
+# ================================================================================
+# DATEI: persona.py
+# PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
+# ZWECK: 
+# WICHTIG FÜR ENTWICKLER: 
+#   - Ändere nichts ohne zu verstehen was passiert
+#   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
+#   - Bei Fragen erst Code lesen, dann ändern
+# ================================================================================
+
 """
 Persona-Modul — Wahrheits-Backbone fuer den HeyPiggy Survey Worker.
 
@@ -40,6 +50,13 @@ from typing import Any
 
 @dataclass(frozen=False)
 class Persona:
+    # ========================================================================
+    # KLASSE: Persona
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     Vollstaendiges Markt-Forschungs-Profil einer Person.
 
@@ -574,6 +591,13 @@ def resolve_answer(
 
 @dataclass
 class AnswerLog:
+    # ========================================================================
+    # KLASSE: AnswerLog
+    # ZWECK: 
+    # WICHTIG: 
+    # METHODEN: 
+    # ========================================================================
+    
     """
     JSONL-basiertes Konsistenz-Log.
 
