@@ -132,3 +132,24 @@ def test_sync_envs_invokes_infisical_sync(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert calls["project_id"] == "proj-123"
     assert calls["environment"] == "dev"
     assert calls["folder_root"] == "/opensin/test"
+    assert calls["verify"] is True
+    assert calls["dry_run"] is False
+
+
+def test_sync_envs_dry_run_forwards_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("INFISICAL_TOKEN", "token-123")
+
+    calls = {}
+
+    def fake_sync_roots(roots, **kwargs):
+        calls.update(kwargs)
+        return [object()]
+
+    monkeypatch.setattr("infisical_sync.sync_roots", fake_sync_roots)
+
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        rc = main(["sync-envs", "--root", str(tmp_path), "--dry-run", "--no-verify"])
+
+    assert rc == 0
+    assert calls["dry_run"] is True
+    assert calls["verify"] is False

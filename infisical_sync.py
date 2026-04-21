@@ -126,10 +126,25 @@ def sync_env_file_to_infisical(
     branch: str = "main",
     agent_id: str = "",
     origin: str = "local",
+    dry_run: bool = False,
+    verify: bool = False,
 ) -> SyncResult:
-    """Upload a single env file to Infisical and optionally emit Brain facts."""
+    """Upload a single env file to Infisical and optionally emit Brain facts.
+
+    WHY: A sync step without verification is just optimistic file copying.
+    The explicit CLI can request verification; startup auto-sync can stay fast.
+    """
     normalized = normalize_env_file(source)
     try:
+        if dry_run:
+            return SyncResult(
+                source=source,
+                target=target,
+                secrets_synced=len(normalized.mapping),
+                normalized_file=normalized.path,
+                brain_facts=0,
+            )
+
         cmd = [
             "infisical",
             "secrets",
@@ -143,6 +158,14 @@ def sync_env_file_to_infisical(
             f"--file={normalized.path}",
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+
+        if verify and normalized.mapping:
+            _verify_remote_mapping(
+                normalized.mapping,
+                token=token,
+                domain=domain,
+                target=target,
+            )
 
         brain_facts = 0
         if brain is not None:
@@ -185,6 +208,40 @@ def sync_env_file_to_infisical(
             pass
 
 
+def _verify_remote_mapping(
+    mapping: dict[str, str],
+    *,
+    token: str,
+    domain: str,
+    target: InfisicalTarget,
+) -> None:
+    """Best-effort readback verification for a synced env file.
+
+    WHY: The safest sync path is write -> readback -> compare. We verify each
+    key individually so values stay unambiguous even if the Infisical CLI output
+    format changes.
+    """
+    for key, expected in mapping.items():
+        cmd = [
+            "infisical",
+            "secrets",
+            "get",
+            key,
+            "--plain",
+            "--silent",
+            f"--domain={domain}",
+            "--token",
+            token,
+            f"--projectId={target.project_id}",
+            f"--env={target.environment}",
+            f"--path={target.folder}",
+        ]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        actual = result.stdout.strip()
+        if actual != expected:
+            raise ValueError(f"Infisical verification failed for {key}")
+
+
 def sync_roots(
     roots: Iterable[Path],
     *,
@@ -197,8 +254,14 @@ def sync_roots(
     branch: str = "main",
     agent_id: str = "",
     origin: str = "scan",
+    dry_run: bool = False,
+    verify: bool = False,
 ) -> list[SyncResult]:
-    """Scan multiple roots and sync any env-like files discovered."""
+    """Scan multiple roots and sync any env-like files discovered.
+
+    WHY: This is the recursive policy engine that lets agents collapse env
+    sprawl into Infisical without hand-maintaining per-repo upload scripts.
+    """
     results: list[SyncResult] = []
     for root in roots:
         if not root.exists():
@@ -239,6 +302,8 @@ def sync_roots(
                     branch=branch,
                     agent_id=agent_id,
                     origin=origin,
+                    dry_run=dry_run,
+                    verify=verify,
                 )
             )
     return results

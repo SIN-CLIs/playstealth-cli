@@ -113,6 +113,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.getenv("INFISICAL_FOLDER_ROOT", "/opensin/a2a-sin-worker-heypiggy"),
         help="Target Infisical folder root (default: current repo folder root).",
     )
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Normalize and count files only; do not write to Infisical.",
+    )
+    sync.add_argument(
+        "--no-verify",
+        action="store_false",
+        dest="verify",
+        default=True,
+        help="Skip readback verification after upload (verification is on by default).",
+    )
 
     # --- doctor ------------------------------------------------------------
     sub.add_parser(
@@ -314,9 +326,12 @@ def _run_infisical_sync(args: argparse.Namespace, log: BoundLogger) -> int:
         repo=repo_name,
         agent_id=os.environ.get("BRAIN_AGENT_ID", "a2a-sin-worker-heypiggy"),
         branch=os.environ.get("GIT_BRANCH", os.environ.get("BRANCH_NAME", "main")),
+        dry_run=args.dry_run,
+        verify=args.verify,
     )
     log.info("infisical_sync_completed", roots=len(roots), files=len(results))
-    print(f"synced {len(results)} env files to Infisical")
+    mode = "dry-run" if args.dry_run else "sync"
+    print(f"{mode}: processed {len(results)} env files for Infisical")
     return _EXIT_OK
 
 
@@ -342,6 +357,7 @@ def _maybe_auto_sync_infisical(cfg: object, log: BoundLogger, sync_roots_fn) -> 
             repo=repo_root.name,
             agent_id=getattr(cfg.persona, "brain_agent_id", "a2a-sin-worker-heypiggy"),
             branch=os.environ.get("GIT_BRANCH", os.environ.get("BRANCH_NAME", "main")),
+            verify=False,
         )
         log.info("infisical_auto_sync_completed", roots=len(roots))
     except Exception as exc:  # pragma: no cover - best effort only
