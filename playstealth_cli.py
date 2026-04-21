@@ -74,6 +74,17 @@ def _parser() -> argparse.ArgumentParser:
     answer_cmd.add_argument("--index", type=int, default=0, help="Survey card index after scoring")
     answer_cmd.add_argument("--option-index", type=int, default=0, help="Answer option index")
 
+    run_cmd = sub.add_parser(
+        "run-survey", help="Open one survey and try to advance through modal questions"
+    )
+    run_cmd.add_argument(
+        "--timeout-seconds", type=int, default=300, help="How long to wait for manual login"
+    )
+    run_cmd.add_argument("--index", type=int, default=0, help="Survey card index after scoring")
+    run_cmd.add_argument(
+        "--max-steps", type=int, default=5, help="Maximum survey-modal steps to attempt"
+    )
+
     return parser
 
 
@@ -216,6 +227,20 @@ async def _inspect_survey(page) -> None:
                 except Exception:
                     val = ""
                 print(f"   • control[{i}]: {txt[:120]!r} value={val!r}")
+        frames = page.frames
+        print(f"🪟 frames: {len(frames)}")
+        for i, frame in enumerate(frames[:6]):
+            try:
+                frame_url = frame.url
+            except Exception:
+                frame_url = "<unavailable>"
+            print(f"   • frame[{i}] url={frame_url}")
+            if frame_url and "frameurl" in frame_url:
+                try:
+                    txt = await frame.locator("body").inner_text(timeout=3000)
+                    print(f"   • frame[{i}] body: {txt[:500]!r}")
+                except Exception as frame_error:
+                    print(f"   • frame[{i}] body error: {frame_error}")
     except Exception as inspect_error:
         print(f"⚠️ Survey modal inspect failed: {inspect_error}")
 
@@ -232,6 +257,24 @@ async def _answer_survey(page, option_index: int) -> None:
     count = await radios.count()
     print(f"🎚️ modal inputs: {count}")
     if count == 0:
+        start_btn = modal.locator(
+            "button:has-text('Umfrage starten'), button:has-text('Nächste'), button:has-text('Next')"
+        )
+        if await start_btn.count() > 0:
+            try:
+                await start_btn.first.evaluate("el => el.click()")
+            except Exception:
+                try:
+                    await page.evaluate(
+                        "() => { const el = document.getElementById('submit-button-cpx'); if (el) el.click(); }"
+                    )
+                except Exception:
+                    await page.evaluate(
+                        "() => { if (typeof submitQuestion === 'function') submitQuestion(); }"
+                    )
+            await asyncio.sleep(2)
+            print("➡️ Start/Next clicked")
+            return
         raise RuntimeError("No selectable inputs found in survey modal")
 
     target = radios.nth(min(option_index, count - 1))
@@ -262,6 +305,10 @@ async def _run_open_list(timeout_seconds: int) -> int:
     finally:
         try:
             await context.close()
+        except Exception:
+            pass
+        try:
+            await playwright.stop()
         except Exception:
             pass
         try:
@@ -338,6 +385,36 @@ async def _run_answer_survey(timeout_seconds: int, index: int, option_index: int
             await context.close()
         except Exception:
             pass
+
+
+async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> int:
+    playwright, context, page = await _open_browser()
+    try:
+        if await _wait_for_list(page, timeout_seconds):
+            print("✅ Login erkannt")
+        if page.is_closed() and context.pages:
+            page = context.pages[0]
+        await asyncio.sleep(1)
+        await _print_cards(page, context)
+        await _click_card(page, index)
+        if page.is_closed() and context.pages:
+            page = context.pages[-1]
+
+        for step in range(max_steps):
+            await asyncio.sleep(1.5)
+            modal = page.locator("#survey-modal")
+            if not await modal.is_visible():
+                print(f"✅ Survey modal closed after {step} steps")
+                break
+            print(f"🔁 Survey step {step + 1}/{max_steps}")
+            await _inspect_survey(page)
+            await _answer_survey(page, 0)
+        return 0
+    finally:
+        try:
+            await context.close()
+        except Exception:
+            pass
         try:
             await playwright.stop()
         except Exception:
@@ -356,6 +433,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_inspect_survey(args.timeout_seconds, args.index))
     if args.command == "answer-survey":
         return asyncio.run(_run_answer_survey(args.timeout_seconds, args.index, args.option_index))
+    if args.command == "run-survey":
+        return asyncio.run(_run_survey_loop(args.timeout_seconds, args.index, args.max_steps))
 
     parser.error(f"unknown command: {args.command}")
     return 2
