@@ -398,6 +398,15 @@ class PlaywrightDriver(BrowserDriver):
         self._browser = None
         self._context = None
         self._page = None
+        self._profile_root = Path(
+            self._config.get(
+                "profile_root",
+                os.environ.get(
+                    "HEYPIGGY_PLAYWRIGHT_PROFILE_ROOT",
+                    str(Path.home() / ".heypiggy" / "playwright_profile_clone"),
+                ),
+            )
+        )
         # Human-like timing config - ENTWICKLER: Nicht ändern!
         self._type_delay_ms = self._config.get("type_delay_ms", (40, 120))  # (min, max)
         self._mouse_move_ms = self._config.get("mouse_move_ms", (100, 300))
@@ -422,31 +431,8 @@ class PlaywrightDriver(BrowserDriver):
         self._playwright = await async_playwright().start()
         stealth_config = self._config.get("stealth", True)
 
-        # Launch browser mit stealth settings
-        launch_options = {
-            "headless": self._config.get(
-                "headless", False
-            ),  # DEBUG: Default False für Sichtbarkeit
-            "args": [
-                "--disable-blink-features=AutomationControlled",  # VERSTECKE automation flag
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-infobars",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                "--metrics-recording-only",
-                "--mute-audio",
-                "--no-first-run",
-            ],
-        }
-
-        self._browser = await self._playwright.chromium.launch(**launch_options)
-
-        # Create context mit RANDOMIZED settings (echter User)
-        # ENTWICKLER: Dies ist KRITISCH für Anti-Bot-Erkennung!
+        # Persistenter Context: login cookies/storage bleiben im Clone erhalten.
+        # Das ist der Unterschied zwischen "jedes Mal neu einloggen" und "einmal loggen, dann weiterlaufen".
         viewport_width = self._config.get("width", 1920)
         viewport_height = self._config.get("height", 1080)
 
@@ -469,8 +455,30 @@ class PlaywrightDriver(BrowserDriver):
             ]
             context_options["user_agent"] = random.choice(user_agents)
 
-        self._context = await self._browser.new_context(**context_options)
-        self._page = await self._context.new_page()
+        self._profile_root.mkdir(parents=True, exist_ok=True)
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(self._profile_root),
+            headless=self._config.get("headless", False),
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--metrics-recording-only",
+                "--mute-audio",
+                "--no-first-run",
+            ],
+            **context_options,
+        )
+        self._browser = self._context.browser
+        self._page = (
+            self._context.pages[0] if self._context.pages else await self._context.new_page()
+        )
 
         # Inject stealth script um automation COMPLETT zu verstecken
         if stealth_config:
