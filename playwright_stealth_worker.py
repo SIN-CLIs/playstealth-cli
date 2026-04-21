@@ -38,6 +38,8 @@ from playwright_stealth.stealth import Stealth
 
 CHROME_USER_DATA_DIR = Path.home() / "Library/Application Support/Google/Chrome"
 PLAYWRIGHT_PROFILE_STORE = Path.home() / ".heypiggy" / "playwright_profile_clone"
+WINDOW_WIDTH = 1024
+WINDOW_HEIGHT = 768
 
 
 def detect_chrome_profile_dir() -> str:
@@ -137,10 +139,72 @@ async def wait_for_manual_login(page, timeout_seconds: int = 300) -> bool:
     deadline = asyncio.get_event_loop().time() + timeout_seconds
     while asyncio.get_event_loop().time() < deadline:
         current_url = (page.url or "").lower()
-        if "login" not in current_url and "signin" not in current_url:
+        if (
+            "login" not in current_url and "signin" not in current_url
+        ) or "page=dashboard" in current_url:
             return True
         await asyncio.sleep(1.5)
     return False
+
+
+async def _score_survey_candidate(candidate) -> tuple[int, dict[str, str]]:
+    """Bewerte einen potentiellen Survey-Entry nach Text/Href-Signalen."""
+    try:
+        text = (await candidate.inner_text(timeout=1500)).strip()
+    except Exception:
+        text = ""
+    try:
+        href = await candidate.get_attribute("href") or ""
+    except Exception:
+        href = ""
+    haystack = f"{text} {href}".lower()
+    score = 0
+    for token, weight in [
+        ("survey", 5),
+        ("umfrage", 5),
+        ("start", 4),
+        ("starten", 4),
+        ("begin", 3),
+        ("take", 2),
+        ("earn", 2),
+        ("reward", 2),
+        ("panel", 1),
+        ("question", 1),
+    ]:
+        if token in haystack:
+            score += weight
+    return score, {"text": text, "href": href}
+
+
+async def _score_open_survey_candidate(candidate) -> tuple[int, dict[str, str]]:
+    """Bewerte einen echten Survey-Start-Kandidaten auf der Quellenliste."""
+    try:
+        text = (await candidate.inner_text(timeout=1500)).strip()
+    except Exception:
+        text = ""
+    try:
+        href = await candidate.get_attribute("href") or ""
+    except Exception:
+        href = ""
+    haystack = f"{text} {href}".lower()
+    if href.lower().startswith("javascript:show_page("):
+        return -100, {"text": text, "href": href}
+    score = 0
+    for token, weight in [
+        ("€", 6),
+        ("minute", 5),
+        ("min", 3),
+        ("survey", 4),
+        ("umfrage", 4),
+        ("start", 3),
+        ("begin", 2),
+        ("open", 1),
+        ("go", 1),
+        ("http", 2),
+    ]:
+        if token in haystack:
+            score += weight
+    return score, {"text": text, "href": href}
 
 
 async def main():
@@ -175,6 +239,7 @@ async def main():
                 channel="chrome",
                 headless=False,
                 args=[
+                    f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
@@ -183,7 +248,7 @@ async def main():
             )
             page = context.pages[0] if context.pages else await context.new_page()
 
-        await page.set_viewport_size({"width": 1920, "height": 1080})
+        await page.set_viewport_size({"width": WINDOW_WIDTH, "height": WINDOW_HEIGHT})
 
         # Aktiviere Stealth
         stealth = Stealth()
@@ -317,11 +382,193 @@ async def main():
                     print(f"✅ {len(elements)} Umfragen gefunden mit: {sel}")
                     surveys_found = True
 
-                    # Klicke auf erste Umfrage
-                    await elements[0].click()
+                    # Wähle den besten sichtbaren Einstieg anhand von Text/Href.
+                    best_score = -1
+                    target = None
+                    for candidate in elements:
+                        try:
+                            if not await candidate.is_visible():
+                                continue
+                            score, meta = await _score_survey_candidate(candidate)
+                            print(
+                                f"🔎 Kandidat: score={score} text={meta['text'][:80]!r} href={meta['href']!r}"
+                            )
+                            if score > best_score:
+                                best_score = score
+                                target = candidate
+                        except Exception:
+                            continue
+                    if target is None:
+                        target = elements[0]
+
+                    # Klicke auf den gewählten Einstieg (genau ein Nutzerklick)
+                    clicked = False
+                    try:
+                        await target.scroll_into_view_if_needed(timeout=4000)
+                        await asyncio.sleep(0.5)
+                        await target.click(timeout=4000, force=True)
+                        clicked = True
+                    except Exception as first_click_error:
+                        print(f"⚠️ Force-click fehlgeschlagen: {first_click_error}")
+                        try:
+                            await target.evaluate("el => el.click()")
+                            clicked = True
+                        except Exception as js_click_error:
+                            print(f"⚠️ JS-click fehlgeschlagen: {js_click_error}")
+
                     await asyncio.sleep(3)
+                    if context is not None and len(context.pages) > 1:
+                        page = context.pages[-1]
+                        print(f"🪟 Neuer Tab erkannt: {page.url}")
+                    try:
+                        body_text = await page.locator("body").inner_text(timeout=3000)
+                        print(f"🧾 Body-Snippet: {body_text[:300]!r}")
+                    except Exception as body_error:
+                        print(f"⚠️ Body-Text nicht lesbar: {body_error}")
+                    if "deine verfügbaren quellen" in body_text.lower():
+                        # OBSERVATION: Der erste Klick auf "Umfragen" öffnet nur die
+                        # Survey-Liste. Der eigentliche Einstieg ist das survey-item
+                        # mit onclick=clickSurvey('<id>'). Darum priorisieren wir unten
+                        # explizit survey_list / survey-item statt erneut den Sidebar-Link.
+                        survey_cards = page.locator("#survey_list .survey-item")
+                        card_count = await survey_cards.count()
+                        print(f"🪪 Survey-Item Cards: {card_count}")
+                        best_card = None
+                        best_card_score = -1
+                        for i in range(min(card_count, 20)):
+                            card = survey_cards.nth(i)
+                            try:
+                                if not await card.is_visible():
+                                    continue
+                                card_score, card_meta = await _score_open_survey_candidate(card)
+                                print(
+                                    f"🎯 Card: score={card_score} text={card_meta['text'][:80]!r} href={card_meta['href']!r}"
+                                )
+                                if card_score > best_card_score:
+                                    best_card_score = card_score
+                                    best_card = card
+                            except Exception:
+                                continue
+
+                        if best_card is not None:
+                            try:
+                                best_card_onclick = await best_card.get_attribute("onclick") or ""
+                                await best_card.scroll_into_view_if_needed(timeout=4000)
+                                await asyncio.sleep(0.5)
+                                await best_card.dispatch_event("click")
+                                await asyncio.sleep(3)
+                                try:
+                                    body_text = await page.locator("body").inner_text(timeout=3000)
+                                    print(f"🧾 Nach-Card-Click Body: {body_text[:300]!r}")
+                                except Exception:
+                                    body_text = ""
+                                if (
+                                    "deine verfügbaren quellen" in body_text.lower()
+                                    or "survey_list" in body_text.lower()
+                                ) and "clickSurvey(" in best_card_onclick:
+                                    survey_id = best_card_onclick.split("clickSurvey('")[1].split(
+                                        "')"
+                                    )[0]
+                                    print(f"🔧 Direct clickSurvey fallback: {survey_id}")
+                                    await page.evaluate("sid => clickSurvey(sid)", survey_id)
+                                    await asyncio.sleep(3)
+                                    try:
+                                        body_text = await page.locator("body").inner_text(
+                                            timeout=3000
+                                        )
+                                        print(
+                                            f"🧾 Nach-direct clickSurvey Body: {body_text[:300]!r}"
+                                        )
+                                    except Exception:
+                                        pass
+                                print(f"📄 URL nach Card-Click: {page.url}")
+                            except Exception as card_click_error:
+                                print(f"⚠️ Card-Click fehlgeschlagen: {card_click_error}")
+                                try:
+                                    onclick = await best_card.get_attribute("onclick") or ""
+                                    if "clickSurvey(" in onclick:
+                                        survey_id = onclick.split("clickSurvey('")[1].split("')")[0]
+                                        await page.evaluate("sid => clickSurvey(sid)", survey_id)
+                                        await asyncio.sleep(3)
+                                        body_text = await page.locator("body").inner_text(
+                                            timeout=3000
+                                        )
+                                        print(f"🧾 Nach-clickSurvey Body: {body_text[:300]!r}")
+                                        print(f"📄 URL nach clickSurvey: {page.url}")
+                                except Exception as invoke_error:
+                                    print(f"⚠️ clickSurvey-Aufruf fehlgeschlagen: {invoke_error}")
+                        clickable = page.locator("a, button, [role='button']")
+                        total = await clickable.count()
+                        best_score = -1
+                        best_el = None
+                        print(f"🔎 Survey-List Kandidaten: {total}")
+                        for i in range(min(total, 40)):
+                            candidate = clickable.nth(i)
+                            try:
+                                if not await candidate.is_visible():
+                                    continue
+                                score, meta = await _score_open_survey_candidate(candidate)
+                                if score <= 0:
+                                    continue
+                                print(
+                                    f"🔎 Open-Kandidat: score={score} text={meta['text'][:100]!r} href={meta['href']!r}"
+                                )
+                                if score > best_score:
+                                    best_score = score
+                                    best_el = candidate
+                            except Exception:
+                                continue
+                        try:
+                            survey_nodes = await page.evaluate(
+                                """
+                                () => Array.from(document.querySelectorAll('*'))
+                                  .filter(el => {
+                                    const t = (el.innerText || '').trim();
+                                    if (!t) return false;
+                                    if (!/[€]/.test(t) || !/Minute/i.test(t)) return false;
+                                    const r = el.getBoundingClientRect();
+                                    if (r.width < 20 || r.height < 20) return false;
+                                    const idClass = `${el.id || ''} ${el.className || ''}`.toLowerCase();
+                                    if (idClass.includes('sidebar')) return false;
+                                    if (idClass.includes('menue_button_sidebar')) return false;
+                                    return true;
+                                  })
+                                  .slice(0, 10)
+                                  .map(el => ({
+                                    tag: el.tagName,
+                                    text: (el.innerText || '').trim().slice(0, 120),
+                                    href: el.getAttribute('href') || '',
+                                    onclick: el.getAttribute('onclick') || '',
+                                    role: el.getAttribute('role') || '',
+                                    id: el.id || '',
+                                    cls: el.className || '',
+                                  }))
+                                """
+                            )
+                            print(f"🧩 Survey-Nodes: {survey_nodes}")
+                        except Exception as node_error:
+                            print(f"⚠️ Survey-Node-Scan fehlgeschlagen: {node_error}")
+                        if best_el is not None:
+                            try:
+                                await best_el.scroll_into_view_if_needed(timeout=4000)
+                                await asyncio.sleep(0.5)
+                                await best_el.click(timeout=4000, force=True)
+                                await asyncio.sleep(3)
+                                try:
+                                    body_text = await page.locator("body").inner_text(timeout=3000)
+                                    print(f"🧾 Nach-Start Body: {body_text[:300]!r}")
+                                except Exception:
+                                    pass
+                                print(f"📄 URL nach Survey-Start: {page.url}")
+                            except Exception as open_click_error:
+                                print(f"⚠️ Survey-Start Klick fehlgeschlagen: {open_click_error}")
                     print(f"📄 URL nach Umfrage-Klick: {page.url}")
-                    break
+                    print(f"🧷 Klick-Status: {'ok' if clicked else 'failed'}")
+                    if context is not None:
+                        await context.close()
+                    if browser is not None and not connected_via_cdp:
+                        await browser.close()
+                    return
             except Exception:
                 continue
 

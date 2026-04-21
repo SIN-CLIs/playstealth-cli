@@ -491,6 +491,7 @@ class PlaywrightDriver(BrowserDriver):
             channel="chrome",
             headless=self._config.get("headless", False),
             args=[
+                f"--window-size={viewport_width},{viewport_height}",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
