@@ -455,7 +455,16 @@ async def main():
                                 best_card_onclick = await best_card.get_attribute("onclick") or ""
                                 await best_card.scroll_into_view_if_needed(timeout=4000)
                                 await asyncio.sleep(0.5)
-                                await best_card.dispatch_event("click")
+                                # Survey-Starts öffnen oft ein Popup/नई Seite. Wir fangen das
+                                # explizit ab, damit ein erfolgreicher Klick nicht wie ein
+                                # "No-op" aussieht.
+                                popup_page = None
+                                try:
+                                    async with page.expect_popup(timeout=5000) as popup_info:
+                                        await best_card.dispatch_event("click")
+                                    popup_page = await popup_info.value
+                                except Exception:
+                                    await best_card.dispatch_event("click")
                                 await asyncio.sleep(3)
                                 try:
                                     body_text = await page.locator("body").inner_text(timeout=3000)
@@ -470,8 +479,27 @@ async def main():
                                         "')"
                                     )[0]
                                     print(f"🔧 Direct clickSurvey fallback: {survey_id}")
-                                    await page.evaluate("sid => clickSurvey(sid)", survey_id)
+                                    click_result = await page.evaluate(
+                                        "sid => clickSurvey(sid)", survey_id
+                                    )
+                                    print(f"🧠 clickSurvey result: {click_result!r}")
                                     await asyncio.sleep(3)
+                                    try:
+                                        overlays = await page.evaluate(
+                                            """
+                                            () => Array.from(document.querySelectorAll('iframe, [role="dialog"], .modal, .overlay'))
+                                              .map(el => ({
+                                                tag: el.tagName,
+                                                id: el.id || '',
+                                                cls: el.className || '',
+                                                text: (el.innerText || '').trim().slice(0, 120),
+                                                visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                                              }))
+                                            """
+                                        )
+                                        print(f"🪟 Overlays/Iframes: {overlays}")
+                                    except Exception as overlay_error:
+                                        print(f"⚠️ Overlay-Scan fehlgeschlagen: {overlay_error}")
                                     try:
                                         body_text = await page.locator("body").inner_text(
                                             timeout=3000
@@ -481,6 +509,22 @@ async def main():
                                         )
                                     except Exception:
                                         pass
+                                if popup_page is not None:
+                                    try:
+                                        await popup_page.wait_for_load_state(
+                                            "domcontentloaded", timeout=5000
+                                        )
+                                    except Exception:
+                                        pass
+                                    print(f"🪟 Popup-Page erkannt: {popup_page.url}")
+                                    page = popup_page
+                                    try:
+                                        popup_text = await popup_page.locator("body").inner_text(
+                                            timeout=3000
+                                        )
+                                        print(f"🧾 Popup-Body: {popup_text[:300]!r}")
+                                    except Exception as popup_error:
+                                        print(f"⚠️ Popup-Body nicht lesbar: {popup_error}")
                                 print(f"📄 URL nach Card-Click: {page.url}")
                             except Exception as card_click_error:
                                 print(f"⚠️ Card-Click fehlgeschlagen: {card_click_error}")

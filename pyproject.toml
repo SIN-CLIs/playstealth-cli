@@ -55,6 +55,7 @@ dev = [
 
 [project.scripts]
 heypiggy-worker = "worker.cli:main"
+playstealth = "playstealth_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy"
@@ -73,6 +74,7 @@ py-modules = [
   "fail_report",
   "nvidia_video_analyzer",
   "observability",
+  "playstealth_cli",
   "state_machine",
   "heypiggy_vision_worker",
 ]
