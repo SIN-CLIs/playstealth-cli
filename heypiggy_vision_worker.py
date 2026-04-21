@@ -70,6 +70,7 @@ from typing import Any, Callable
 
 from circuit_breaker import CircuitBreaker
 from config import load_config_from_env
+from driver_interface import create_driver, BrowserDriver, DriverType
 from fail_recorder import ScreenRingRecorder, save_keyframes_to_disk
 from fail_report import (
     generate_fail_report_markdown,
@@ -255,6 +256,12 @@ SESSION_DIR = WORKER_CONFIG.artifacts.session_dir
 
 # Erstelle alle Verzeichnisse beim Start
 WORKER_CONFIG.artifacts.ensure_dirs()
+
+# GLOBAL BROWSER DRIVER - Nutze Playwright statt Bridge für Anti-Bot-Erkennung!
+# ENTWICKLER: Setze DRIVER_TYPE=playwright in ENV um Playwright zu nutzen!
+# Wenn nicht gesetzt, wird automatisch Playwright genommen (weil Bridge nicht funktioniert)
+_GLOBAL_DRIVER: BrowserDriver | None = None
+_GLOBAL_DRIVER_INITIALIZED = False
 
 CURRENT_RUN_SUMMARY: RunSummary | None = None
 VISION_CIRCUIT_BREAKER = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
@@ -2806,6 +2813,125 @@ async def recover_worker_tab_id() -> int | None:
     return None
 
 
+def _get_driver() -> BrowserDriver | None:
+    """Hole oder erstelle den globalen Browser Driver.
+
+    ENTWICKLER: Dies ist KRITISCH für Anti-Bot-Erkennung!
+    Der Driver wird lazy initialisiert beim ersten Aufruf.
+    """
+    global _GLOBAL_DRIVER, _GLOBAL_DRIVER_INITIALIZED
+
+    if _GLOBAL_DRIVER is not None and _GLOBAL_DRIVER.is_initialized:
+        return _GLOBAL_DRIVER
+
+    # Initialisiere Driver nur einmal
+    if not _GLOBAL_DRIVER_INITIALIZED:
+        driver_type = os.environ.get("DRIVER_TYPE", "playwright").lower()
+        try:
+            _GLOBAL_DRIVER = create_driver(driver_type)
+            audit(
+                "driver_init",
+                message=f"Browser Driver erstellt: {driver_type}",
+                driver_type=driver_type,
+            )
+        except Exception as e:
+            audit(
+                "driver_init_error",
+                message=f"Driver Creation failed: {e}",
+                driver_type=driver_type,
+            )
+            _GLOBAL_DRIVER = None
+        _GLOBAL_DRIVER_INITIALIZED = True
+
+    return _GLOBAL_DRIVER
+
+
+async def _execute_via_driver(driver: BrowserDriver, method: str, params: dict) -> dict:
+    """Führe Bridge-Methode über Driver aus.
+
+    ENTWICKLER: Dies mapped die alte Bridge-MCP API auf das neue Driver Interface.
+    Dies ermöglicht Playwright mit Stealth zu nutzen OHNE den Worker-Code zu ändern!
+    """
+    tab_id = params.get("tabId")
+
+    try:
+        if method == "observe" or method == "screenshot" or method == "dom.screenshot":
+            # Screenshot holen
+            result = await driver.screenshot(tab_id)
+            return {
+                "screenshot": {
+                    "dataUrl": result.data_url,
+                    "width": result.width,
+                    "height": result.height,
+                }
+            }
+
+        elif method == "snapshot":
+            # DOM Snapshot
+            result = await driver.snapshot(tab_id)
+            return {
+                "html": result.html,
+                "url": result.url,
+                "title": result.title,
+                "accessibility_tree": result.accessibility_tree,
+                "elements": result.elements,
+            }
+
+        elif method == "click_ref":
+            # Click per ref
+            ref = params.get("ref", "")
+            result = await driver.click_ref(ref, tab_id)
+            return {"success": result.success, "error": result.error}
+
+        elif method == "dom.click" or method == "click_element":
+            # Click per selector
+            selector = params.get("selector", "")
+            result = await driver.click(selector, tab_id)
+            return {"success": result.success, "error": result.error}
+
+        elif method == "dom.type" or method == "type_text":
+            # Type text
+            text = params.get("text", "")
+            selector = params.get("selector")
+            result = await driver.type_text(text, selector, tab_id)
+            return {
+                "success": result.success,
+                "characters_sent": result.characters_sent,
+                "error": result.error,
+            }
+
+        elif method == "execute_javascript" or method == "javascript":
+            # JavaScript ausführen
+            script = params.get("script", "")
+            result = await driver.execute_javascript(script, tab_id)
+            return {"result": result.result, "error": result.error}
+
+        elif method == "get_page_info":
+            # Page Info
+            result = await driver.get_page_info(tab_id)
+            return result
+
+        elif method == "goto" or method == "navigate":
+            # Navigate
+            url = params.get("url", "")
+            result = await driver.navigate(url, tab_id)
+            return result
+
+        elif method == "tabs_list" or method == "list_tabs":
+            # List tabs
+            result = await driver.list_tabs()
+            return {"tabs": result}
+
+        else:
+            # Unbekannte Methode - versuche als JS auszuführen
+            audit("driver_method_fallback", method=method)
+            return {"error": f"Driver does not support method: {method}"}
+
+    except Exception as e:
+        audit("driver_execute_error", method=method, error=str(e))
+        return {"error": str(e)}
+
+
 async def execute_bridge(method: str, params: dict[str, object] | None = None):
     # -------------------------------------------------------------------------
     # FUNKTION: execute_bridge
@@ -2832,6 +2958,16 @@ async def execute_bridge(method: str, params: dict[str, object] | None = None):
     started_at = time.time()
     call_params = dict(params or {})
 
+    # ==============================================================================
+    # DRIVER ROUTING: Nutze Playwright Driver statt Bridge wenn konfiguriert!
+    # ENTWICKLER: Dies ist KRITISCH für Anti-Bot-Erkennung!
+    # ==============================================================================
+    driver = _get_driver()
+    if driver is not None and driver.is_initialized:
+        # Route to Playwright driver instead of MCP Bridge
+        return await _execute_via_driver(driver, method, call_params)
+
+    # Fallback to MCP Bridge wenn Driver nicht verfügbar
     if _bridge_v2_enabled() and method != "bridge.contract" and BRIDGE_CONTRACT_INFO is None:
         try:
             await _pin_bridge_contract_if_needed()
