@@ -226,7 +226,32 @@ async def _inspect_survey(page) -> None:
                     val = await ctl.get_attribute("value") or ""
                 except Exception:
                     val = ""
-                print(f"   • control[{i}]: {txt[:120]!r} value={val!r}")
+                try:
+                    outer = await ctl.evaluate(
+                        "el => ({tag: el.tagName, id: el.id || '', cls: el.className || '', name: el.getAttribute('name') || '', onclick: el.getAttribute('onclick') || '', type: el.getAttribute('type') || '', text: (el.innerText || '').trim().slice(0, 120), html: el.outerHTML.slice(0, 300)})"
+                    )
+                except Exception:
+                    outer = {
+                        "tag": "?",
+                        "id": "",
+                        "cls": "",
+                        "name": "",
+                        "onclick": "",
+                        "type": "",
+                        "text": txt[:120],
+                        "html": "",
+                    }
+                print(f"   • control[{i}]: {outer}")
+        try:
+            iframe = page.locator("iframe#frameurl")
+            if await iframe.count() > 0:
+                print(f"🧩 frameurl src: {await iframe.first.get_attribute('src')!r}")
+                print(f"🧩 frameurl name: {await iframe.first.get_attribute('name')!r}")
+                print(
+                    f"🧩 frameurl outer: {(await iframe.first.evaluate('el => el.outerHTML.slice(0, 300)'))!r}"
+                )
+        except Exception as iframe_error:
+            print(f"⚠️ frameurl inspect failed: {iframe_error}")
         frames = page.frames
         print(f"🪟 frames: {len(frames)}")
         for i, frame in enumerate(frames[:6]):
@@ -257,23 +282,26 @@ async def _answer_survey(page, option_index: int) -> None:
     count = await radios.count()
     print(f"🎚️ modal inputs: {count}")
     if count == 0:
-        start_btn = modal.locator(
-            "button:has-text('Umfrage starten'), button:has-text('Nächste'), button:has-text('Next')"
-        )
+        start_btn = modal.locator("#start-survey-button")
         if await start_btn.count() > 0:
             try:
                 await start_btn.first.evaluate("el => el.click()")
             except Exception:
                 try:
                     await page.evaluate(
-                        "() => { const el = document.getElementById('submit-button-cpx'); if (el) el.click(); }"
+                        "() => { const el = document.getElementById('start-survey-button'); if (el) el.click(); }"
                     )
                 except Exception:
                     await page.evaluate(
-                        "() => { if (typeof submitQuestion === 'function') submitQuestion(); }"
+                        "() => { if (typeof openSurvey === 'function') openSurvey(); }"
                     )
             await asyncio.sleep(2)
-            print("➡️ Start/Next clicked")
+            try:
+                src = await page.locator("iframe#frameurl").get_attribute("src")
+                print(f"🧩 frameurl src after start: {src!r}")
+            except Exception:
+                pass
+            print("➡️ Start clicked")
             return
         raise RuntimeError("No selectable inputs found in survey modal")
 
@@ -290,6 +318,28 @@ async def _answer_survey(page, option_index: int) -> None:
         print("➡️ Next clicked")
     else:
         print("⚠️ Kein Next-Button gefunden")
+
+
+async def _wait_for_question_state(page, timeout_seconds: int = 10) -> bool:
+    """Wait until the consent modal turns into a real question or iframe loads."""
+    deadline = asyncio.get_event_loop().time() + timeout_seconds
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            modal_text = (await page.locator("#survey-modal").inner_text(timeout=1000)).lower()
+        except Exception:
+            modal_text = ""
+        try:
+            iframe_src = await page.locator("iframe#frameurl").get_attribute("src") or ""
+        except Exception:
+            iframe_src = ""
+        if iframe_src.strip():
+            print(f"🧩 frameurl src became active: {iframe_src!r}")
+            return True
+        if "umfrage starten" not in modal_text and "du kannst jetzt" not in modal_text:
+            print(f"🧩 survey-modal changed: {modal_text[:200]!r}")
+            return True
+        await asyncio.sleep(1)
+    return False
 
 
 async def _run_open_list(timeout_seconds: int) -> int:
@@ -405,6 +455,23 @@ async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> 
             modal = page.locator("#survey-modal")
             if not await modal.is_visible():
                 print(f"✅ Survey modal closed after {step} steps")
+                await _wait_for_question_state(page, timeout_seconds=10)
+                try:
+                    body = await page.locator("body").inner_text(timeout=3000)
+                    print(f"🧾 Post-start body: {body[:800]!r}")
+                except Exception as body_error:
+                    print(f"⚠️ Post-start body error: {body_error}")
+                try:
+                    iframe = page.locator("iframe#frameurl")
+                    if await iframe.count() > 0:
+                        print(
+                            f"🧩 frameurl src post-start: {await iframe.first.get_attribute('src')!r}"
+                        )
+                        print(
+                            f"🧩 frameurl html post-start: {(await iframe.first.evaluate('el => el.outerHTML.slice(0, 500)'))!r}"
+                        )
+                except Exception as iframe_error:
+                    print(f"⚠️ Post-start iframe error: {iframe_error}")
                 break
             print(f"🔁 Survey step {step + 1}/{max_steps}")
             await _inspect_survey(page)
