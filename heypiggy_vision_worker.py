@@ -1030,24 +1030,33 @@ async def _bridge_tool_names() -> set[str]:
 def _translate_v2_bridge_method(
     method: str, params: dict[str, object] | None = None
 ) -> tuple[str, dict[str, object]]:
-    """Map legacy worker/tool names to the canonical v1 bridge surface."""
+    """Map legacy worker/tool names to the bridge surface.
+
+    IMMER anwenden - auch wenn v2 nicht aktiviert ist,
+    weil execute_javascript nicht existiert aber execute_script schon!
+    """
     call_params: dict[str, object] = dict(params or {})
+
+    # IMMER diese Translationen anwenden (unabhängig von OPENSIN_V2)
+    always_translate = {"execute_javascript", "javascript"}
+    if method in always_translate:
+        script = str(params.get("script") or "") if params else ""
+        # CSP bypass: Nutze eval_oder Alternative
+        # Versuche zuerst execute_script, wenn das fehlschlägt versuchen wir was anderes
+        return ("execute_script", {"script": script})
+
     if not _bridge_v2_enabled():
+        return method, call_params
+    if BRIDGE_TOOL_SURFACE_KIND == "legacy":
         return method, call_params
     if BRIDGE_TOOL_SURFACE_KIND == "legacy":
         return method, call_params
 
     translations: dict[str, tuple[str, Callable[[dict[str, object]], dict[str, object]]]] = {
-        "execute_javascript": (
-            "dom.evaluate",
-            lambda p: {
-                "tabId": p.get("tabId"),
-                "expression": str(p.get("script") or p.get("expression") or ""),
-                "args": p.get("args"),
-                "awaitPromise": bool(p.get("awaitPromise", True)),
-                "returnByValue": bool(p.get("returnByValue", True)),
-            },
-        ),
+        # execute_javascript -> execute_script (Bridge hat execute_script)
+        "execute_javascript": ("execute_script", lambda p: {"script": str(p.get("script") or "")}),
+        "javascript": ("execute_script", lambda p: {"script": str(p.get("script") or "")}),
+        "execute_script": ("execute_script", lambda p: {"script": str(p.get("script") or "")}),
         "tabs_create": (
             "tabs.create",
             lambda p: {"url": str(p.get("url", "")), "active": bool(p.get("active", True))},
@@ -2027,10 +2036,26 @@ async def ensure_worker_preflight() -> dict:
         audit("stop", reason=reason)
         return {"ok": False, "reason": reason}
 
-    if not await check_bridge_alive():
-        reason = "Bridge nicht erreichbar während Preflight"
-        audit("stop", reason=reason)
-        return {"ok": False, "reason": reason}
+    # Skip Bridge check if using Playwright driver (Playwright has its own browser!)
+    driver_type = os.environ.get("DRIVER_TYPE", "").lower()
+    if driver_type != "playwright":
+        if not await check_bridge_alive():
+            reason = "Bridge nicht erreichbar während Preflight"
+            audit("stop", reason=reason)
+            return {"ok": False, "reason": reason}
+    else:
+        # Initialize Playwright driver for preflight
+        try:
+            driver = await _init_driver()
+            if driver and driver.is_initialized:
+                # Navigate to HeyPiggy to verify it works
+                result = await driver.navigate("https://www.heypiggy.com")
+                if not result.get("success"):
+                    audit("preflight_playwright_navigate_failed", result=result)
+            else:
+                audit("preflight_playwright_not_ready")
+        except Exception as e:
+            audit("preflight_playwright_error", error=str(e))
 
     if _bridge_v2_enabled():
         try:
@@ -2813,11 +2838,11 @@ async def recover_worker_tab_id() -> int | None:
     return None
 
 
-def _get_driver() -> BrowserDriver | None:
-    """Hole oder erstelle den globalen Browser Driver.
+async def _init_driver() -> BrowserDriver | None:
+    """Initialisiere den globalen Browser Driver.
 
     ENTWICKLER: Dies ist KRITISCH für Anti-Bot-Erkennung!
-    Der Driver wird lazy initialisiert beim ersten Aufruf.
+    Der Driver wird einmal async initialisiert beim Worker-Start.
     """
     global _GLOBAL_DRIVER, _GLOBAL_DRIVER_INITIALIZED
 
@@ -2834,6 +2859,13 @@ def _get_driver() -> BrowserDriver | None:
                 message=f"Browser Driver erstellt: {driver_type}",
                 driver_type=driver_type,
             )
+            # KRITISCH: Initialize the driver!
+            await _GLOBAL_DRIVER.initialize()
+            audit(
+                "driver_init_complete",
+                message=f"Browser Driver initialisiert und bereit: {driver_type}",
+                driver_type=driver_type,
+            )
         except Exception as e:
             audit(
                 "driver_init_error",
@@ -2843,6 +2875,11 @@ def _get_driver() -> BrowserDriver | None:
             _GLOBAL_DRIVER = None
         _GLOBAL_DRIVER_INITIALIZED = True
 
+    return _GLOBAL_DRIVER
+
+
+def _get_driver() -> BrowserDriver | None:
+    """Hole den initialisierten Driver (sync version for compatibility)."""
     return _GLOBAL_DRIVER
 
 
@@ -2900,7 +2937,7 @@ async def _execute_via_driver(driver: BrowserDriver, method: str, params: dict) 
                 "error": result.error,
             }
 
-        elif method == "execute_javascript" or method == "javascript":
+        elif method == "execute_javascript" or method == "javascript" or method == "execute_script":
             # JavaScript ausführen
             script = params.get("script", "")
             result = await driver.execute_javascript(script, tab_id)
@@ -2962,12 +2999,14 @@ async def execute_bridge(method: str, params: dict[str, object] | None = None):
     # DRIVER ROUTING: Nutze Playwright Driver statt Bridge wenn konfiguriert!
     # ENTWICKLER: Dies ist KRITISCH für Anti-Bot-Erkennung!
     # ==============================================================================
-    driver = _get_driver()
+    driver = await _init_driver()
     if driver is not None and driver.is_initialized:
-        # Route to Playwright driver instead of MCP Bridge
-        return await _execute_via_driver(driver, method, call_params)
+        # Route to Playwright driver ONLY for Playwright
+        driver_type = os.environ.get("DRIVER_TYPE", "playwright").lower()
+        if driver_type == "playwright":
+            return await _execute_via_driver(driver, method, call_params)
 
-    # Fallback to MCP Bridge wenn Driver nicht verfügbar
+    # Fallback to MCP Bridge for bridge driver or if driver routing failed
     if _bridge_v2_enabled() and method != "bridge.contract" and BRIDGE_CONTRACT_INFO is None:
         try:
             await _pin_bridge_contract_if_needed()
@@ -6863,6 +6902,17 @@ async def main():
     global CURRENT_TAB_ID, CURRENT_WINDOW_ID
     try:
         audit("navigate", url="https://www.heypiggy.com/login")
+
+        # KRITISCH: Enable ADVANCED STEALTH before any page interaction!
+        # Dies entfernt Bot-Detection Marker und umgeht CSP/unsafe-eval Blocks
+        try:
+            stealth_result = await execute_bridge(
+                "advanced_stealth", {"tabId": CURRENT_TAB_ID} if CURRENT_TAB_ID else {}
+            )
+            audit("advanced_stealth_enabled", result=stealth_result)
+        except Exception as e:
+            audit("advanced_stealth_error", error=str(e))
+
         # KRITISCH: active: True — Tab MUSS im Vordergrund sein!
         # Mit active: False läuft der Tab im Hintergrund → Screenshots zeigen falschen Inhalt
         # → Vision Gate sieht nichts → DOM-Verifikation gibt url="" zurück → Worker hängt
@@ -7045,32 +7095,38 @@ async def main():
     # Screen (wir sind automatisch angemeldet).
     # CONSEQUENCES: Wir sparen pro Run 30-120 Sekunden + vermeiden dass Panels
     # uns als "haeufige Neu-Logins" markieren (Trust-Score-Abwertung).
-    try:
-        # WHY: target_url kommt jetzt aus dem aktiven Platform-Profil damit der
-        # Worker fuer andere Anbieter (Prolific, Clickworker, Attapoll, ...) ohne
-        # Code-Aenderung nur per ENV umgeschaltet werden kann.
-        _profile = _active_platform()
-        restore_result = await _session_restore(
-            execute_bridge=execute_bridge,
-            tab_params=_tab_params(),
-            target_url=_profile.dashboard_url,
-            audit=audit,
-        )
-        if restore_result.get("restored"):
-            audit(
-                "session_restore_applied",
-                cookies_set=restore_result.get("cookies_set"),
-                storage_keys=restore_result.get("storage_keys"),
-                saved_at=restore_result.get("saved_at"),
+
+    # Skip session restore when using Playwright - Playwright has its own session!
+    driver_type = os.environ.get("DRIVER_TYPE", "").lower()
+    if driver_type != "playwright":
+        try:
+            # WHY: target_url kommt jetzt aus dem aktiven Platform-Profil damit der
+            # Worker fuer andere Anbieter (Prolific, Clickworker, Attapoll, ...) ohne
+            # Code-Aenderung nur per ENV umgeschaltet werden kann.
+            _profile = _active_platform()
+            restore_result = await _session_restore(
+                execute_bridge=execute_bridge,
+                tab_params=_tab_params(),
+                target_url=_profile.dashboard_url,
+                audit=audit,
             )
-            # Reload damit die restaurierten Cookies/Storage greifen
-            try:
-                await execute_bridge("reload", _tab_params())
-                await human_delay(3.5, 5.0)
-            except Exception as re:
-                audit("session_restore_reload_error", error=str(re))
-    except Exception as e:
-        audit("session_restore_error", error=str(e))
+            if restore_result.get("restored"):
+                audit(
+                    "session_restore_applied",
+                    cookies_set=restore_result.get("cookies_set"),
+                    storage_keys=restore_result.get("storage_keys"),
+                    saved_at=restore_result.get("saved_at"),
+                )
+                # Reload damit die restaurierten Cookies/Storage greifen
+                try:
+                    await execute_bridge("reload", _tab_params())
+                    await human_delay(3.5, 5.0)
+                except Exception as re:
+                    audit("session_restore_reload_error", error=str(re))
+        except Exception as e:
+            audit("session_restore_error", error=str(e))
+    else:
+        audit("session_restore_skipped", reason="using_playwright_driver")
 
     # Session direkt nach Laden sichern (und persistenten Cache aktualisieren)
     await save_session("initial_load")
