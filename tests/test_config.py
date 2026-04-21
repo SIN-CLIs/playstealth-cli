@@ -1,8 +1,8 @@
 # ================================================================================
 # DATEI: test_config.py
 # PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
-# ZWECK: 
-# WICHTIG FÜR ENTWICKLER: 
+# ZWECK:
+# WICHTIG FÜR ENTWICKLER:
 #   - Ändere nichts ohne zu verstehen was passiert
 #   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
 #   - Bei Fragen erst Code lesen, dann ändern
@@ -28,21 +28,21 @@ from config import (
 class WorkerConfigTests(unittest.TestCase):
     # ========================================================================
     # KLASSE: WorkerConfigTests(unittest.TestCase)
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     def test_worker_config_uses_typed_nested_defaults(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: test_worker_config_uses_typed_nested_defaults
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
+        # -------------------------------------------------------------------------
+        # FUNKTION: test_worker_config_uses_typed_nested_defaults
+        # PARAMETER: self
+        # ZWECK:
+        # WAS PASSIERT HIER:
+        # WARUM DIESER WEG:
+        # ACHTUNG:
+        # -------------------------------------------------------------------------
+
         cfg = WorkerConfig()
 
         self.assertIsInstance(cfg.bridge, BridgeConfig)
@@ -59,17 +59,18 @@ class WorkerConfigTests(unittest.TestCase):
         )
         self.assertIn("click_element", cfg.click_actions)
         self.assertIn("vision_click", cfg.click_actions)
+        self.assertFalse(cfg.opensin_v2)
 
     def test_config_objects_are_frozen_against_runtime_mutation(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: test_config_objects_are_frozen_against_runtime_mutation
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
+        # -------------------------------------------------------------------------
+        # FUNKTION: test_config_objects_are_frozen_against_runtime_mutation
+        # PARAMETER: self
+        # ZWECK:
+        # WAS PASSIERT HIER:
+        # WARUM DIESER WEG:
+        # ACHTUNG:
+        # -------------------------------------------------------------------------
+
         cfg = WorkerConfig()
 
         with self.assertRaises(FrozenInstanceError):
@@ -82,21 +83,21 @@ class WorkerConfigTests(unittest.TestCase):
 class ArtifactConfigTests(unittest.TestCase):
     # ========================================================================
     # KLASSE: ArtifactConfigTests(unittest.TestCase)
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     def test_artifact_paths_are_derived_from_run_id(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: test_artifact_paths_are_derived_from_run_id
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
+        # -------------------------------------------------------------------------
+        # FUNKTION: test_artifact_paths_are_derived_from_run_id
+        # PARAMETER: self
+        # ZWECK:
+        # WAS PASSIERT HIER:
+        # WARUM DIESER WEG:
+        # ACHTUNG:
+        # -------------------------------------------------------------------------
+
         cfg = ArtifactConfig(run_id="run-123", base_dir="/tmp/heypiggy")
 
         self.assertEqual(cfg.artifact_dir, Path("/tmp/heypiggy/heypiggy_run_run-123"))
@@ -111,15 +112,15 @@ class ArtifactConfigTests(unittest.TestCase):
         )
 
     def test_ensure_dirs_creates_complete_directory_tree(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: test_ensure_dirs_creates_complete_directory_tree
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
+        # -------------------------------------------------------------------------
+        # FUNKTION: test_ensure_dirs_creates_complete_directory_tree
+        # PARAMETER: self
+        # ZWECK:
+        # WAS PASSIERT HIER:
+        # WARUM DIESER WEG:
+        # ACHTUNG:
+        # -------------------------------------------------------------------------
+
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = ArtifactConfig(run_id="run-456", base_dir=tmpdir)
 
@@ -134,22 +135,13 @@ class ArtifactConfigTests(unittest.TestCase):
 class LoadConfigFromEnvTests(unittest.TestCase):
     # ========================================================================
     # KLASSE: LoadConfigFromEnvTests(unittest.TestCase)
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     def test_load_config_from_env_uses_defaults_when_env_missing(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: test_load_config_from_env_uses_defaults_when_env_missing
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"HEYPIGGY_DISABLE_SAVED_ENV": "1"}, clear=True):
             cfg = load_config_from_env()
 
         self.assertEqual(
@@ -162,18 +154,19 @@ class LoadConfigFromEnvTests(unittest.TestCase):
         self.assertTrue(cfg.artifacts.run_id)
 
     def test_load_config_from_env_applies_overrides_and_type_casts(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: test_load_config_from_env_applies_overrides_and_type_casts
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
+        # -------------------------------------------------------------------------
+        # FUNKTION: test_load_config_from_env_applies_overrides_and_type_casts
+        # PARAMETER: self
+        # ZWECK:
+        # WAS PASSIERT HIER:
+        # WARUM DIESER WEG:
+        # ACHTUNG:
+        # -------------------------------------------------------------------------
+
         with patch.dict(
             os.environ,
             {
+                "HEYPIGGY_DISABLE_SAVED_ENV": "1",
                 "BRIDGE_MCP_URL": "https://bridge.example/mcp",
                 "BRIDGE_HEALTH_URL": "https://bridge.example/health",
                 "BRIDGE_CONNECT_TIMEOUT": "42",
@@ -194,6 +187,7 @@ class LoadConfigFromEnvTests(unittest.TestCase):
                 "RECORDER_KEYFRAMES": "7",
                 "HEYPIGGY_RUN_ID": "manual-run-id",
                 "HEYPIGGY_ARTIFACT_BASE": "/var/tmp/heypiggy",
+                "OPENSIN_V2": "1",
             },
             clear=True,
         ):
@@ -225,3 +219,32 @@ class LoadConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.recorder.keyframes_on_fail, 7)
         self.assertEqual(cfg.artifacts.run_id, "manual-run-id")
         self.assertEqual(cfg.artifacts.base_dir, "/var/tmp/heypiggy")
+        self.assertTrue(cfg.opensin_v2)
+
+    def test_load_config_from_env_reads_saved_env_file_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "\n".join(
+                    [
+                        'export HEYPIGGY_EMAIL="saved@example.com"',
+                        'export HEYPIGGY_PASSWORD="saved-password"',
+                        'export NVIDIA_API_KEY="nvapi-saved"',
+                        'export BRIDGE_MCP_URL="https://bridge.saved/mcp"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HEYPIGGY_DISABLE_SAVED_ENV": "0",
+                    "HEYPIGGY_ENV_FILE": str(env_file),
+                },
+                clear=True,
+            ):
+                cfg = load_config_from_env()
+
+        self.assertEqual(cfg.nvidia.api_key, "nvapi-saved")
+        self.assertEqual(cfg.bridge.mcp_url, "https://bridge.saved/mcp")

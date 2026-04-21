@@ -29,6 +29,7 @@ KONSEQUENZEN:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 from typing import Any, Awaitable, Callable
 
@@ -67,6 +68,35 @@ PERMANENT_MARKERS: tuple[str, ...] = (
     "method not found",
 )
 
+TRANSIENT_CONTRACT_CODES: tuple[str, ...] = (
+    "transport_error",
+    "timeout",
+    "target_gone",
+    "navigation_aborted",
+    "navigation_timeout",
+    "cdp_failed",
+    "frame_detached",
+    "session_stale",
+    "session_invalid",
+    "anti_bot_challenge",
+    "rate_limit_remote",
+)
+
+PERMANENT_CONTRACT_CODES: tuple[str, ...] = (
+    "rpc_invalid",
+    "unknown_method",
+    "rate_limited",
+    "element_not_found",
+    "element_not_actionable",
+    "postcondition_failed",
+    "duplicate_action",
+    "session_locked",
+    "origin_not_permitted",
+    "captcha_required",
+    "unsupported",
+    "internal_error",
+)
+
 
 def classify_result(result: Any) -> str:
     """
@@ -83,7 +113,27 @@ def classify_result(result: Any) -> str:
             err = result.get("reason")
     if not err:
         return "ok"
+
+    if isinstance(err, dict):
+        retry_hint = str(err.get("retryHint") or err.get("retry_hint") or "").strip().lower()
+        if retry_hint in {"safe_retry", "recover_then_retry"}:
+            return "transient"
+        if retry_hint == "abort":
+            return "permanent"
+
+        code = str(err.get("code") or err.get("errorCode") or "").strip().lower()
+        if code in TRANSIENT_CONTRACT_CODES:
+            return "transient"
+        if code in PERMANENT_CONTRACT_CODES:
+            return "permanent"
+
     err_low = str(err).lower()
+    for marker in TRANSIENT_CONTRACT_CODES:
+        if marker in err_low:
+            return "transient"
+    for marker in PERMANENT_CONTRACT_CODES:
+        if marker in err_low:
+            return "permanent"
     for marker in PERMANENT_MARKERS:
         if marker in err_low:
             return "permanent"
@@ -96,14 +146,16 @@ def classify_result(result: Any) -> str:
 
 
 async def call_with_retry(
-    bridge: Callable[[str, dict[str, Any] | None], Awaitable[Any]],
-    method: str,
+    bridge: Callable[..., Awaitable[Any]],
+    method: str | None = None,
     params: dict[str, Any] | None = None,
     *,
     max_attempts: int = 3,
     base_delay: float = 0.2,
     max_delay: float = 4.0,
+    jitter: float = 0.3,
     audit: Callable[..., None] | None = None,
+    on_retry: Callable[[int, str, float], Awaitable[None] | None] | None = None,
 ) -> Any:
     """
     Ruft `bridge(method, params)` mit Exponential Backoff bei transienten
@@ -124,12 +176,17 @@ async def call_with_retry(
     attempt = 0
     last_result: Any = None
     while attempt < max_attempts:
+        error_text = ""
         try:
-            result = await bridge(method, params)
+            call_result = bridge() if method is None else bridge(method, params)
+            result = await call_result if inspect.isawaitable(call_result) else call_result
         except Exception as e:
             # Exceptions aus der Bridge-Schicht selbst -> als transient behandeln
-            result = {"error": f"exception: {type(e).__name__}: {e}"}
+            error_text = f"exception: {type(e).__name__}: {e}"
+            result = {"error": error_text}
         attempt += 1
+        if not error_text:
+            error_text = _extract_error_text(result)
         klass = classify_result(result)
         if klass == "ok":
             if attempt > 1 and audit:
@@ -150,8 +207,7 @@ async def call_with_retry(
             return result
         # Transient -> exponential backoff mit Jitter
         delay = min(max_delay, base_delay * (3.0 ** (attempt - 1)))
-        jitter = delay * 0.3 * random.random()
-        wait = delay + jitter
+        wait = delay + (delay * max(0.0, jitter) * random.random())
         if audit:
             audit(
                 "bridge_retry_wait",
@@ -159,10 +215,24 @@ async def call_with_retry(
                 attempt=attempt,
                 wait_ms=round(wait * 1000),
                 classification=klass,
+                error=error_text[:120],
             )
+        if on_retry:
+            maybe_awaitable = on_retry(attempt, error_text, wait)
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
         await asyncio.sleep(wait)
         last_result = result
     return last_result
+
+
+def _extract_error_text(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    err = result.get("error") or result.get("errorMessage") or result.get("message")
+    if not err and result.get("ok") is False and result.get("reason"):
+        err = result.get("reason")
+    return str(err) if err is not None else ""
 
 
 # ---------------------------------------------------------------------------

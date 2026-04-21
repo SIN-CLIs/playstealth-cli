@@ -28,6 +28,70 @@ from pathlib import Path
 from datetime import datetime
 
 
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Liest einfache KEY=VALUE- und export KEY=VALUE-.env-Dateien."""
+    if not path.is_file():
+        return {}
+
+    parsed: dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            parsed[key] = value
+    except Exception:
+        return {}
+    return parsed
+
+
+def ensure_saved_env_loaded() -> bool:
+    """Lädt persistierte Worker-ENV-Werte aus gespeicherten .env-Dateien.
+
+    WHY: Die HeyPiggy-Runs müssen ohne manuelles Nachfragen mit den lokal
+    gespeicherten Zugangsdaten laufen. Priorität: explizite HEYPIGGY_ENV_FILE
+    -> Repo-.env -> ~/.env. Setzt vorhandene Werte bewusst überschreibend.
+    """
+    if _is_truthy(os.environ.get("HEYPIGGY_DISABLE_SAVED_ENV")):
+        return False
+
+    repo_env = Path(__file__).resolve().parent / ".env"
+    home_env = Path.home() / ".env"
+    explicit_env_file = os.environ.get("HEYPIGGY_ENV_FILE", "").strip()
+
+    candidates: list[Path] = [home_env, repo_env]
+    if explicit_env_file:
+        candidates.append(Path(explicit_env_file).expanduser())
+
+    loaded_any = False
+    for env_path in candidates:
+        env_values = _parse_env_file(env_path)
+        if not env_values:
+            continue
+        loaded_any = True
+        for key, value in env_values.items():
+            if key in {"HEYPIGGY_DISABLE_SAVED_ENV", "HEYPIGGY_ENV_FILE"}:
+                continue
+            os.environ[key] = value
+
+    return loaded_any
+
+
 @dataclass(frozen=True)
 class BridgeConfig:
     """
@@ -314,15 +378,17 @@ class WorkerConfig:
         "vision_click",
         "click_coordinates",
     )
+    opensin_v2: bool = False
 
 
 def load_config_from_env() -> WorkerConfig:
     """
     Lädt eine WorkerConfig aus Environment-Variablen.
     WHY: Jeder Deployment-Kontext (Mac, HF VM, CI) hat andere Anforderungen.
-         ENV-Variablen sind der Standard für containerisierte Konfiguration.
+    ENV-Variablen sind der Standard für containerisierte Konfiguration.
     CONSEQUENCES: Defaults greifen wenn ENV nicht gesetzt. Keine harten Crashes.
     """
+    ensure_saved_env_loaded()
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     fallback_models_env = os.environ.get("NVIDIA_FALLBACK_MODELS", "")
     fallback_models = NvidiaConfig.fallback_models
@@ -345,6 +411,8 @@ def load_config_from_env() -> WorkerConfig:
     explicit_urls: tuple[str, ...] = ()
     if explicit_urls_env.strip():
         explicit_urls = tuple(u.strip() for u in explicit_urls_env.split(",") if u.strip())
+
+    opensin_v2 = os.environ.get("OPENSIN_V2", "0").strip().lower() in {"1", "true", "yes", "on"}
 
     return WorkerConfig(
         bridge=BridgeConfig(
@@ -434,4 +502,5 @@ def load_config_from_env() -> WorkerConfig:
             run_id=os.environ.get("HEYPIGGY_RUN_ID", run_id),
             base_dir=os.environ.get("HEYPIGGY_ARTIFACT_BASE", "/tmp"),
         ),
+        opensin_v2=opensin_v2,
     )

@@ -83,6 +83,11 @@ DEFAULT_DOMAINS: list[str] = [
 BridgeFn = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
+def _bridge_v2_enabled() -> bool:
+    """Return true when the worker is running against the strict v2 bridge."""
+    return str(os.environ.get("OPENSIN_V2", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _domains_from_env() -> list[str]:
     extra = os.environ.get("HEYPIGGY_SESSION_DOMAINS", "").strip()
     if not extra:
@@ -125,6 +130,66 @@ def _cookie_domain_matches(cookie_domain: str, target_domain: str) -> bool:
     return cd == target_domain or cd.endswith("." + target_domain)
 
 
+def _cookie_url_for_set(target_url: str, cookie: dict[str, Any]) -> str | None:
+    """
+    Baut die von chrome.cookies.set verlangte URL fuer ein Cookie.
+
+    WHY: Die Bridge verlangt fuer `cookies.set` zwingend ein `url`-Feld.
+         Exportierte Cookies enthalten aber meist nur `domain` + `path`.
+    CONSEQUENCES: Wir rekonstruieren eine gueltige URL aus der Zielseite und
+         dem Cookie-Attribut, damit Session-Restore nicht an einem fehlenden
+         `url` scheitert.
+    """
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        parsed = None
+
+    host = (parsed.hostname if parsed else "") or str(cookie.get("domain", "")).lstrip(".")
+    if not host:
+        return None
+
+    scheme = "https"
+    if parsed and parsed.scheme in {"http", "https"}:
+        scheme = parsed.scheme
+    if cookie.get("secure"):
+        scheme = "https"
+
+    path = str(cookie.get("path") or "/")
+    if not path.startswith("/"):
+        path = "/" + path
+
+    return f"{scheme}://{host}{path}"
+
+
+def _sanitize_cookie_for_set(target_url: str, cookie: dict[str, Any]) -> dict[str, Any]:
+    """Build a cookie payload accepted by the bridge cookie setter."""
+    cookie_payload: dict[str, Any] = {}
+    for key in (
+        "name",
+        "value",
+        "url",
+        "domain",
+        "path",
+        "secure",
+        "httpOnly",
+        "sameSite",
+        "expirationDate",
+        "storeId",
+    ):
+        if key in cookie:
+            cookie_payload[key] = cookie[key]
+
+    # Chromium/bridge exports include bookkeeping fields that cookies.set
+    # rejects (e.g. hostOnly, session). Drop them explicitly.
+    cookie_payload.pop("hostOnly", None)
+    cookie_payload.pop("session", None)
+
+    if not cookie_payload.get("url"):
+        cookie_payload["url"] = _cookie_url_for_set(target_url, cookie)
+    return cookie_payload
+
+
 # ----------------------------------------------------------------------------
 # DUMP
 # ----------------------------------------------------------------------------
@@ -157,50 +222,52 @@ async def dump_session(
     except Exception as e:
         audit("session_dump_cookies_error", error=str(e))
 
-    # 2) LocalStorage + SessionStorage via JS dumpen
-    storage_js = r"""
-    (function() {
-      function dump(s) {
-        var out = {};
-        try {
-          for (var i = 0; i < s.length; i++) {
-            var k = s.key(i);
-            if (!k) continue;
-            try { out[k] = s.getItem(k); } catch(e) {}
-          }
-        } catch(e) {}
-        return out;
-      }
-      return {
-        host: location.hostname,
-        origin: location.origin,
-        local: dump(window.localStorage || {length:0, key:function(){return null}, getItem:function(){return null}}),
-        session: dump(window.sessionStorage || {length:0, key:function(){return null}, getItem:function(){return null}})
-      };
-    })();
-    """
     local_storage: dict[str, str] = {}
     session_storage: dict[str, str] = {}
     current_host = ""
-    try:
-        js_res = await execute_bridge(
-            "execute_javascript", {"script": storage_js, **tab_params}
+    if not _bridge_v2_enabled():
+        # Legacy path: page JS ist nur in der alten Bridge verlässlich genug.
+        storage_js = r"""
+        (function() {
+          function dump(s) {
+            var out = {};
+            try {
+              for (var i = 0; i < s.length; i++) {
+                var k = s.key(i);
+                if (!k) continue;
+                try { out[k] = s.getItem(k); } catch(e) {}
+              }
+            } catch(e) {}
+            return out;
+          }
+          return {
+            host: location.hostname,
+            origin: location.origin,
+            local: dump(window.localStorage || {length:0, key:function(){return null}, getItem:function(){return null}}),
+            session: dump(window.sessionStorage || {length:0, key:function(){return null}, getItem:function(){return null}})
+          };
+        })();
+        """
+        try:
+            js_res = await execute_bridge(
+                "execute_javascript", {"script": storage_js, **tab_params}
+            )
+            payload = js_res.get("result") if isinstance(js_res, dict) else None
+            if isinstance(payload, dict):
+                current_host = str(payload.get("host", ""))
+                ls = payload.get("local") or {}
+                ss = payload.get("session") or {}
+                if isinstance(ls, dict):
+                    local_storage = {str(k): str(v) for k, v in ls.items() if isinstance(k, str)}
+                if isinstance(ss, dict):
+                    session_storage = {str(k): str(v) for k, v in ss.items() if isinstance(k, str)}
+        except Exception as e:
+            audit("session_dump_storage_error", error=str(e))
+    else:
+        audit(
+            "session_dump_storage_skipped_v2",
+            message="V2 bridge persists cookies only; JS storage dump skipped",
         )
-        payload = js_res.get("result") if isinstance(js_res, dict) else None
-        if isinstance(payload, dict):
-            current_host = str(payload.get("host", ""))
-            ls = payload.get("local") or {}
-            ss = payload.get("session") or {}
-            if isinstance(ls, dict):
-                local_storage = {
-                    str(k): str(v) for k, v in ls.items() if isinstance(k, str)
-                }
-            if isinstance(ss, dict):
-                session_storage = {
-                    str(k): str(v) for k, v in ss.items() if isinstance(k, str)
-                }
-    except Exception as e:
-        audit("session_dump_storage_error", error=str(e))
 
     # 3) Vorhandenen Cache laden (Merge statt Replace pro Domain)
     existing: dict[str, Any] = {"saved_at": _now_iso(), "domains": {}}
@@ -217,9 +284,9 @@ async def dump_session(
     written_domains: list[str] = []
     for target in domains:
         domain_cookies = [
-            c for c in cookies
-            if isinstance(c, dict)
-            and _cookie_domain_matches(str(c.get("domain", "")), target)
+            c
+            for c in cookies
+            if isinstance(c, dict) and _cookie_domain_matches(str(c.get("domain", "")), target)
         ]
         # Storage nur mitnehmen wenn die aktuelle Seite zu dieser Domain passt
         dom_local = local_storage if current_domain == target else None
@@ -228,9 +295,9 @@ async def dump_session(
         if not domain_cookies and dom_local is None and dom_session is None:
             continue
 
-        prior = existing["domains"].get(target, {}) if isinstance(
-            existing.get("domains"), dict
-        ) else {}
+        prior = (
+            existing["domains"].get(target, {}) if isinstance(existing.get("domains"), dict) else {}
+        )
 
         merged_entry: dict[str, Any] = dict(prior)
         if domain_cookies:
@@ -311,9 +378,7 @@ async def restore_session(
     saved_at = str(data.get("saved_at", ""))
     try:
         if saved_at:
-            ts = datetime.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
-            )
+            ts = datetime.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             age_h = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
             if age_h > max_age_hours:
                 audit("session_restore_stale", age_hours=round(age_h, 1))
@@ -342,11 +407,12 @@ async def restore_session(
     for c in cookies:
         if not isinstance(c, dict):
             continue
+        cookie_payload = _sanitize_cookie_for_set(target_url, c)
+        if not cookie_payload.get("url"):
+            audit("session_restore_cookie_skip", name=c.get("name", "?"), reason="missing_url")
+            continue
         try:
-            await execute_bridge(
-                "set_cookie",
-                {**tab_params, "cookie": c},
-            )
+            await execute_bridge("set_cookie", cookie_payload)
             cookies_set += 1
         except Exception as e:
             # Einzelne Cookies koennen vom Browser abgelehnt werden
@@ -379,14 +445,21 @@ async def restore_session(
           return set;
         })(%s, %s);
         """ % (json.dumps(local), json.dumps(sess))
-        try:
-            res = await execute_bridge(
-                "execute_javascript", {"script": inject_js, **tab_params}
+        if _bridge_v2_enabled():
+            # V2: Browser-Storage via JS bleibt zu fragil; Cookies reichen für den Login-Restore.
+            audit(
+                "session_restore_storage_skipped_v2",
+                message="V2 bridge restores cookies only; page storage restore skipped",
             )
-            if isinstance(res, dict):
-                storage_keys = int(res.get("result") or 0)
-        except Exception as e:
-            audit("session_restore_storage_error", error=str(e))
+        else:
+            try:
+                res = await execute_bridge(
+                    "execute_javascript", {"script": inject_js, **tab_params}
+                )
+                if isinstance(res, dict):
+                    storage_keys = int(res.get("result") or 0)
+            except Exception as e:
+                audit("session_restore_storage_error", error=str(e))
 
     audit(
         "session_restore_ok",

@@ -199,6 +199,9 @@ def _run_worker(args: argparse.Namespace, log: BoundLogger) -> int:
 
 def _run_doctor(log: BoundLogger) -> int:
     """Print a sanity report: version, required env vars, optional deps."""
+    from config import ensure_saved_env_loaded
+
+    ensure_saved_env_loaded()
     required_env = ("NVIDIA_API_KEY", "HEYPIGGY_EMAIL", "HEYPIGGY_PASSWORD")
     missing = [name for name in required_env if not os.environ.get(name)]
 

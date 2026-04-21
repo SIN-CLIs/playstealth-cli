@@ -131,6 +131,46 @@ class SurveyRecord:
 BridgeCallable = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
+def _bridge_v2_enabled() -> bool:
+    return str(os.environ.get("OPENSIN_V2", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_generic_native_selector(selector: str) -> bool:
+    """Erkennt nicht-eindeutige Survey-Karten/Buttons aus nativen Snapshots."""
+    lowered = selector.strip().lower()
+    if not lowered:
+        return False
+    if "#" in lowered:
+        return False
+    generic_markers = (
+        "div.survey-item",
+        ".survey-item",
+        "div.survey-card",
+        ".survey-card",
+        "[data-survey-id]",
+        "[id^='survey-']",
+        '[id^="survey-"]',
+    )
+    return any(marker in lowered for marker in generic_markers)
+
+
+def _normalize_native_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalisiert native DOM-Items auf eindeutige Selektoren, wenn möglich."""
+    normalized = dict(item)
+    selector = str(normalized.get("selector") or "").strip()
+    item_id = str(normalized.get("id") or "").strip()
+    ref = str(normalized.get("ref") or "").strip()
+    if selector.startswith("@") and not ref:
+        normalized["ref"] = selector.lstrip("@").strip()
+        normalized["selector"] = ""
+        selector = ""
+    if item_id and (not selector or _is_generic_native_selector(selector)):
+        normalized["selector"] = f"#{item_id}"
+    elif selector:
+        normalized["selector"] = selector
+    return normalized
+
+
 class SurveyOrchestrator:
     # ========================================================================
     # KLASSE: SurveyOrchestrator
@@ -293,9 +333,7 @@ class SurveyOrchestrator:
             "failed": self.attempted_count - self.completed_count,
             "total_duration_sec": round(total_duration, 1),
             "avg_duration_sec": (
-                round(total_duration / self.attempted_count, 1)
-                if self.attempted_count
-                else 0.0
+                round(total_duration / self.attempted_count, 1) if self.attempted_count else 0.0
             ),
             "state": self._state.name,
             "records": [r.to_dict() for r in self._records],
@@ -500,7 +538,22 @@ class SurveyOrchestrator:
                 self._audit("queue_url_autodetect_href", url=url)
                 return url
             # Button hat keinen href (SPA-Button) → direkt klicken
-            selector = next_button.get("selector", "")
+            ref = str(next_button.get("ref", "") or "").strip()
+            selector = str(next_button.get("selector", "") or "").strip()
+            if ref:
+                try:
+                    await self._bridge(
+                        "click_ref",
+                        {"ref": ref, **self._tab_params()},
+                    )
+                    await asyncio.sleep(2.0)
+                    current = await self._current_url()
+                    if current:
+                        self._audit("queue_url_autodetect_spa", url=current)
+                        return current
+                except Exception as e:
+                    self._audit("queue_autodetect_click_error", error=str(e))
+
             if selector:
                 try:
                     await self._bridge(
@@ -519,13 +572,17 @@ class SurveyOrchestrator:
         await self._navigate_to(self._dashboard_url)
         await asyncio.sleep(2.5)
         best = await self._find_best_dashboard_survey()
-        if best and best.get("selector"):
+        if best and (best.get("selector") or best.get("ref")):
             # Klicken + URL der neuen Seite lesen
             try:
-                await self._bridge(
-                    "ghost_click",
-                    {"selector": best["selector"], **self._tab_params()},
-                )
+                ref = str(best.get("ref", "") or "").strip()
+                if ref:
+                    await self._bridge("click_ref", {"ref": ref, **self._tab_params()})
+                else:
+                    await self._bridge(
+                        "ghost_click",
+                        {"selector": best["selector"], **self._tab_params()},
+                    )
                 await asyncio.sleep(2.5)
                 current = await self._current_url()
                 if current and current != self._dashboard_url:
@@ -543,6 +600,40 @@ class SurveyOrchestrator:
         return None
 
     async def _detect_next_button(self) -> dict[str, Any] | None:
+        if _bridge_v2_enabled():
+            try:
+                result = await self._bridge(
+                    "dom.queryAll",
+                    {
+                        "selector": 'button, a, [role="button"]',
+                        **self._tab_params(),
+                    },
+                )
+                items = result.get("items", []) if isinstance(result, dict) else []
+                if not isinstance(items, list):
+                    return None
+
+                patterns = (
+                    "weiter",
+                    "next",
+                    "continue",
+                    "fortfahren",
+                    "nächste",
+                    "naechste",
+                    "start",
+                    "umfrage starten",
+                    "starte die erste umfrage",
+                )
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    text = str(item.get("text", "") or "").lower().strip()
+                    if text and any(token in text for token in patterns):
+                        return _normalize_native_item(item)
+            except Exception as e:
+                self._audit("queue_detect_error_v2", error=str(e))
+            return None
+
         try:
             result = await self._bridge(
                 "execute_javascript",
@@ -556,6 +647,50 @@ class SurveyOrchestrator:
         return None
 
     async def _find_best_dashboard_survey(self) -> dict[str, Any] | None:
+        if _bridge_v2_enabled():
+            try:
+                result = await self._bridge(
+                    "dom.queryAll",
+                    {
+                        "selector": "div.survey-item, [id^='survey-'], .survey-card, [data-survey-id]",
+                        **self._tab_params(),
+                    },
+                )
+                items = result.get("items", []) if isinstance(result, dict) else []
+                if not isinstance(items, list) or not items:
+                    return None
+
+                def _price(text: str) -> float | None:
+                    import re
+
+                    m = re.search(r"(\d+[.,]\d+)\s*€", text)
+                    if not m:
+                        return None
+                    try:
+                        return float(m.group(1).replace(",", "."))
+                    except Exception:
+                        return None
+
+                best_item = None
+                best_price = -1.0
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    text = str(item.get("text", "") or "")
+                    price = _price(text)
+                    if price is None:
+                        continue
+                    if price > best_price:
+                        best_item = item
+                        best_price = price
+
+                if best_item is None:
+                    best_item = items[0] if isinstance(items[0], dict) else None
+                return _normalize_native_item(best_item) if isinstance(best_item, dict) else None
+            except Exception as e:
+                self._audit("queue_dashboard_scan_error_v2", error=str(e))
+                return None
+
         try:
             result = await self._bridge(
                 "execute_javascript",

@@ -301,3 +301,63 @@ async def test_history_file_written_on_finalize(orch, bridge, tmp_history):
     assert tmp_history.exists()
     content = tmp_history.read_text()
     assert "survey_done" in content
+
+
+@pytest.mark.asyncio
+async def test_v2_dashboard_survey_prefers_explicit_id(monkeypatch, bridge, tmp_history):
+    monkeypatch.setenv("OPENSIN_V2", "1")
+    bridge.return_value = {
+        "items": [
+            {
+                "selector": "div.survey-item",
+                "id": "survey-65467728",
+                "text": "Belohnung 2,50 €",
+            }
+        ]
+    }
+    orch = SurveyOrchestrator(
+        execute_bridge=bridge,
+        tab_params_factory=lambda: {},
+        dashboard_url="https://www.heypiggy.com/",
+        explicit_urls=[],
+        autodetect=True,
+        max_surveys=5,
+        cooldown_sec=0.0,
+        cooldown_jitter=0.0,
+        history_path=tmp_history,
+    )
+
+    best = await orch._find_best_dashboard_survey()
+
+    assert best is not None
+    assert best["selector"] == "#survey-65467728"
+
+
+@pytest.mark.asyncio
+async def test_v2_dashboard_survey_normalizes_selector_ref_style(monkeypatch, bridge, tmp_history):
+    monkeypatch.setenv("OPENSIN_V2", "1")
+    bridge.return_value = {
+        "items": [
+            {
+                "selector": "@e11",
+                "text": "Belohnung 2,50 €",
+            }
+        ]
+    }
+    orch = SurveyOrchestrator(
+        execute_bridge=bridge,
+        tab_params_factory=lambda: {},
+        dashboard_url="https://www.heypiggy.com/",
+        explicit_urls=[],
+        autodetect=True,
+        max_surveys=5,
+        cooldown_sec=0.0,
+        cooldown_jitter=0.0,
+        history_path=tmp_history,
+    )
+
+    best = await orch._find_best_dashboard_survey()
+
+    assert best is not None
+    assert best["selector"] == ""
+    assert best["ref"] == "e11"
