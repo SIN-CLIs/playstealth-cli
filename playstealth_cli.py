@@ -35,6 +35,12 @@ from playwright_stealth_worker import (
     wait_for_manual_login,
 )
 
+from playstealth_actions.answer_survey import run as answer_survey_run
+from playstealth_actions.click_survey import run as click_survey_run
+from playstealth_actions.inspect_survey import run as inspect_survey_run
+from playstealth_actions.open_list import run as open_list_run
+from playstealth_actions.run_survey import run as run_survey_run
+
 WINDOW_WIDTH = 1024
 WINDOW_HEIGHT = 768
 HEYPIGGY_URL = "https://www.heypiggy.com/login?page=dashboard"
@@ -82,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_cmd.add_argument("--index", type=int, default=0, help="Survey card index after scoring")
     run_cmd.add_argument(
-        "--max-steps", type=int, default=5, help="Maximum survey-modal steps to attempt"
+        "--max-steps", type=int, default=20, help="Maximum survey-modal steps to attempt"
     )
 
     return parser
@@ -138,7 +144,7 @@ async def _print_cards(page, context) -> list[dict[str, str]]:
     return scored
 
 
-async def _click_card(page, index: int) -> None:
+async def _click_card(page, index: int):
     cards = page.locator("#survey_list .survey-item")
     count = await cards.count()
     if count == 0:
@@ -203,6 +209,28 @@ async def _click_card(page, index: int) -> None:
         except Exception as overlay_error:
             print(f"⚠️ Overlay-Scan fehlgeschlagen: {overlay_error}")
         print(f"📄 URL nach clickSurvey: {page.url}")
+    await asyncio.sleep(1)
+    if len(page.context.pages) > 1:
+        for candidate in reversed(page.context.pages):
+            if not candidate.is_closed() and candidate.url != "about:blank":
+                print(f"🪟 Active page after click: {candidate.url}")
+                return candidate
+        print(f"🪟 Active page after click: {page.context.pages[-1].url}")
+        return page.context.pages[-1]
+    return page
+
+
+async def _resolve_active_page(page):
+    """Choose the newest non-blank page after a survey action."""
+    pages = [candidate for candidate in page.context.pages if not candidate.is_closed()]
+    if not pages:
+        return page
+    for candidate in reversed(pages):
+        if candidate.url and candidate.url != "about:blank":
+            if candidate != page:
+                print(f"🪟 Switching to active page: {candidate.url}")
+            return candidate
+    return pages[-1]
 
 
 async def _inspect_survey(page) -> None:
@@ -270,7 +298,7 @@ async def _inspect_survey(page) -> None:
         print(f"⚠️ Survey modal inspect failed: {inspect_error}")
 
 
-async def _answer_survey(page, option_index: int) -> None:
+async def _answer_survey(page, option_index: int):
     """Choose one modal option and advance one step."""
     modal = page.locator("#survey-modal")
     visible = await modal.is_visible()
@@ -302,7 +330,7 @@ async def _answer_survey(page, option_index: int) -> None:
             except Exception:
                 pass
             print("➡️ Start clicked")
-            return
+            return await _resolve_active_page(page)
         raise RuntimeError("No selectable inputs found in survey modal")
 
     target = radios.nth(min(option_index, count - 1))
@@ -318,6 +346,7 @@ async def _answer_survey(page, option_index: int) -> None:
         print("➡️ Next clicked")
     else:
         print("⚠️ Kein Next-Button gefunden")
+    return await _resolve_active_page(page)
 
 
 async def _wait_for_question_state(page, timeout_seconds: int = 10) -> bool:
@@ -361,10 +390,6 @@ async def _run_open_list(timeout_seconds: int) -> int:
             await playwright.stop()
         except Exception:
             pass
-        try:
-            await playwright.stop()
-        except Exception:
-            pass
 
 
 async def _run_click_survey(timeout_seconds: int, index: int) -> int:
@@ -376,7 +401,7 @@ async def _run_click_survey(timeout_seconds: int, index: int) -> int:
             page = context.pages[0]
         await asyncio.sleep(1)
         await _print_cards(page, context)
-        await _click_card(page, index)
+        page = await _click_card(page, index)
         return 0
     finally:
         try:
@@ -398,7 +423,7 @@ async def _run_inspect_survey(timeout_seconds: int, index: int) -> int:
             page = context.pages[0]
         await asyncio.sleep(1)
         await _print_cards(page, context)
-        await _click_card(page, index)
+        page = await _click_card(page, index)
         if page.is_closed() and context.pages:
             page = context.pages[-1]
         await asyncio.sleep(2)
@@ -424,11 +449,11 @@ async def _run_answer_survey(timeout_seconds: int, index: int, option_index: int
             page = context.pages[0]
         await asyncio.sleep(1)
         await _print_cards(page, context)
-        await _click_card(page, index)
+        page = await _click_card(page, index)
         if page.is_closed() and context.pages:
             page = context.pages[-1]
         await asyncio.sleep(2)
-        await _answer_survey(page, option_index)
+        page = await _answer_survey(page, option_index)
         return 0
     finally:
         try:
@@ -446,7 +471,7 @@ async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> 
             page = context.pages[0]
         await asyncio.sleep(1)
         await _print_cards(page, context)
-        await _click_card(page, index)
+        page = await _click_card(page, index)
         if page.is_closed() and context.pages:
             page = context.pages[-1]
 
@@ -475,7 +500,7 @@ async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> 
                 break
             print(f"🔁 Survey step {step + 1}/{max_steps}")
             await _inspect_survey(page)
-            await _answer_survey(page, 0)
+            page = await _answer_survey(page, 0)
         return 0
     finally:
         try:
@@ -493,15 +518,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "open-list":
-        return asyncio.run(_run_open_list(args.timeout_seconds))
+        return asyncio.run(open_list_run(args.timeout_seconds))
     if args.command == "click-survey":
-        return asyncio.run(_run_click_survey(args.timeout_seconds, args.index))
+        return asyncio.run(click_survey_run(args.timeout_seconds, args.index))
     if args.command == "inspect-survey":
-        return asyncio.run(_run_inspect_survey(args.timeout_seconds, args.index))
+        return asyncio.run(inspect_survey_run(args.timeout_seconds, args.index))
     if args.command == "answer-survey":
-        return asyncio.run(_run_answer_survey(args.timeout_seconds, args.index, args.option_index))
+        return asyncio.run(answer_survey_run(args.timeout_seconds, args.index, args.option_index))
     if args.command == "run-survey":
-        return asyncio.run(_run_survey_loop(args.timeout_seconds, args.index, args.max_steps))
+        return asyncio.run(run_survey_run(args.timeout_seconds, args.index, args.max_steps))
 
     parser.error(f"unknown command: {args.command}")
     return 2
