@@ -2959,6 +2959,18 @@ async def _execute_via_driver(driver: BrowserDriver, method: str, params: dict) 
             result = await driver.list_tabs()
             return {"tabs": result}
 
+        elif method == "advanced_stealth":
+            # Extra Stealth Härtung: bei Playwright ein no-op, bei Bridge weiterhin via Driver.
+            result = await driver.advanced_stealth(tab_id)
+            return result
+
+        elif method == "tabs_create":
+            # Erzeuge/öffne den Worker-Tab. Playwright liefert eine stabile tabId=0 zurück.
+            url = params.get("url", "")
+            active = bool(params.get("active", True))
+            result = await driver.tabs_create(url, active=active, tab_id=tab_id)
+            return result
+
         else:
             # Unbekannte Methode - versuche als JS auszuführen
             audit("driver_method_fallback", method=method)

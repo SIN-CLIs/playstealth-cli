@@ -191,6 +191,19 @@ class BrowserDriver(ABC):
         """Liste alle offenen Browser Tabs."""
         ...
 
+    async def advanced_stealth(self, tab_id: int | None = None) -> dict[str, Any]:
+        """Aktiviere extra Stealth-Härtung. Default: no-op."""
+        return {"ok": True, "applied": False}
+
+    async def tabs_create(
+        self, url: str, active: bool = True, tab_id: int | None = None
+    ) -> dict[str, Any]:
+        """Erzeuge/öffne einen Tab. Default: navigiert den aktiven Kontext."""
+        result = await self.navigate(url, tab_id)
+        result.setdefault("tabId", 0)
+        result.setdefault("windowId", 0)
+        return result
+
     @abstractmethod
     async def close(self) -> None:
         """Räume Driver Resources auf."""
@@ -715,6 +728,29 @@ class PlaywrightDriver(BrowserDriver):
         if not self._page:
             return []
         return [{"id": 0, "url": self._page.url, "title": await self._page.title()}]
+
+    async def advanced_stealth(self, tab_id: int | None = None) -> dict[str, Any]:
+        """Playwright-Stealth ist bereits aktiv; erneute Härtung ist ein no-op."""
+        if not self._page:
+            return {"ok": False, "error": "Driver not initialized"}
+        return {"ok": True, "applied": True, "mode": "playwright"}
+
+    async def tabs_create(
+        self, url: str, active: bool = True, tab_id: int | None = None
+    ) -> dict[str, Any]:
+        """Öffne die Ziel-URL im aktiven Playwright-Tab und liefere stabile IDs."""
+        if not self._context:
+            return {"error": "Driver not initialized"}
+        if not self._page:
+            self._page = await self._context.new_page()
+        if url:
+            await self._page.goto(url, wait_until="domcontentloaded")
+        if active:
+            try:
+                await self._page.bring_to_front()
+            except Exception:
+                pass
+        return {"tabId": 0, "windowId": 0, "url": self._page.url, "active": active}
 
     async def close(self) -> None:
         """Räume Playwright Resources auf."""
