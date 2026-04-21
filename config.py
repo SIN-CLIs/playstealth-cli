@@ -2,8 +2,8 @@
 # ================================================================================
 # DATEI: config.py
 # PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
-# ZWECK: 
-# WICHTIG FÜR ENTWICKLER: 
+# ZWECK:
+# WICHTIG FÜR ENTWICKLER:
 #   - Ändere nichts ohne zu verstehen was passiert
 #   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
 #   - Bei Fragen erst Code lesen, dann ändern
@@ -123,11 +123,11 @@ class BridgeConfig:
 class VisionConfig:
     # ========================================================================
     # KLASSE: VisionConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     Vision-Model-Konfiguration (Legacy-Switch).
     WHY: `model` ist nur relevant falls VISION_BACKEND auf einen externen
@@ -151,11 +151,11 @@ class VisionConfig:
 class NvidiaConfig:
     # ========================================================================
     # KLASSE: NvidiaConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     NVIDIA NIM API Konfiguration.
     WHY: API-Key, Modell-IDs und Fallback-Kette müssen konfigurierbar sein.
@@ -191,11 +191,11 @@ class NvidiaConfig:
 class MediaConfig:
     # ========================================================================
     # KLASSE: MediaConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     Multi-Modal Media-Pipeline Konfiguration (Audio / Video / Bilder).
     WHY: Umfragen enthalten häufig <audio>/<video>/<img>-Fragen. Wir müssen
@@ -227,11 +227,11 @@ class MediaConfig:
 class QueueConfig:
     # ========================================================================
     # KLASSE: QueueConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     Multi-Survey Queue Konfiguration.
     WHY: Der Worker soll beliebig viele Surveys am Stück erledigen können.
@@ -250,11 +250,11 @@ class QueueConfig:
 class PersonaConfig:
     # ========================================================================
     # KLASSE: PersonaConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     Persona + Global-Brain-Konfiguration — Wahrheits-Backbone des Workers.
 
@@ -278,14 +278,38 @@ class PersonaConfig:
 
 
 @dataclass(frozen=True)
+class InfisicalConfig:
+    # ========================================================================
+    # KLASSE: InfisicalConfig
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
+    # ========================================================================
+
+    """Canonical Infisical sync settings.
+
+    WHY: Secret delivery must be centrally controlled so agents never need to
+    guess which vault, environment, or folder root to use.
+    """
+
+    enabled: bool = True
+    domain: str = "https://eu.infisical.com"
+    project_id: str = "fa7758b4-f84c-4297-966e-710056d531ef"
+    environment: str = "dev"
+    folder_root: str = "/opensin/a2a-sin-worker-heypiggy"
+    auto_sync: bool = False
+    sync_roots: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RecorderConfig:
     # ========================================================================
     # KLASSE: RecorderConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     Fail-Replay Recorder Konfiguration.
     WHY: FPS und Buffer-Dauer sind Tradeoffs zwischen RAM und Abdeckung.
@@ -327,15 +351,15 @@ class ArtifactConfig:
         return self.artifact_dir / "sessions"
 
     def ensure_dirs(self):
-    # -------------------------------------------------------------------------
-    # FUNKTION: ensure_dirs
-    # PARAMETER: self
-    # ZWECK: 
-    # WAS PASSIERT HIER: 
-    # WARUM DIESER WEG: 
-    # ACHTUNG: 
-    # -------------------------------------------------------------------------
-    
+        # -------------------------------------------------------------------------
+        # FUNKTION: ensure_dirs
+        # PARAMETER: self
+        # ZWECK:
+        # WAS PASSIERT HIER:
+        # WARUM DIESER WEG:
+        # ACHTUNG:
+        # -------------------------------------------------------------------------
+
         """Erstellt alle Artefakt-Verzeichnisse."""
         for d in [
             self.artifact_dir,
@@ -350,11 +374,11 @@ class ArtifactConfig:
 class WorkerConfig:
     # ========================================================================
     # KLASSE: WorkerConfig
-    # ZWECK: 
-    # WICHTIG: 
-    # METHODEN: 
+    # ZWECK:
+    # WICHTIG:
+    # METHODEN:
     # ========================================================================
-    
+
     """
     Gesamt-Konfiguration für den HeyPiggy Vision Worker.
     WHY: Einzelner Entry-Point für die gesamte Worker-Konfiguration.
@@ -368,6 +392,7 @@ class WorkerConfig:
     media: MediaConfig = field(default_factory=MediaConfig)
     queue: QueueConfig = field(default_factory=QueueConfig)
     persona: PersonaConfig = field(default_factory=PersonaConfig)
+    infisical: InfisicalConfig = field(default_factory=InfisicalConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     artifacts: ArtifactConfig = field(default_factory=ArtifactConfig)
 
@@ -413,6 +438,12 @@ def load_config_from_env() -> WorkerConfig:
         explicit_urls = tuple(u.strip() for u in explicit_urls_env.split(",") if u.strip())
 
     opensin_v2 = os.environ.get("OPENSIN_V2", "0").strip().lower() in {"1", "true", "yes", "on"}
+    infisical_sync_roots_env = os.environ.get("INFISICAL_SYNC_ROOTS", "")
+    infisical_sync_roots: tuple[str, ...] = ()
+    if infisical_sync_roots_env.strip():
+        infisical_sync_roots = tuple(
+            p.strip() for p in infisical_sync_roots_env.split(",") if p.strip()
+        )
 
     return WorkerConfig(
         bridge=BridgeConfig(
@@ -488,6 +519,15 @@ def load_config_from_env() -> WorkerConfig:
             brain_timeout_sec=float(
                 os.environ.get("BRAIN_TIMEOUT_SEC", PersonaConfig.brain_timeout_sec)
             ),
+        ),
+        infisical=InfisicalConfig(
+            enabled=os.environ.get("INFISICAL_ENABLED", "1") != "0",
+            domain=os.environ.get("INFISICAL_DOMAIN", InfisicalConfig.domain),
+            project_id=os.environ.get("INFISICAL_PROJECT_ID", InfisicalConfig.project_id),
+            environment=os.environ.get("INFISICAL_ENV", InfisicalConfig.environment),
+            folder_root=os.environ.get("INFISICAL_FOLDER_ROOT", InfisicalConfig.folder_root),
+            auto_sync=os.environ.get("INFISICAL_AUTO_SYNC", "0") != "0",
+            sync_roots=infisical_sync_roots,
         ),
         recorder=RecorderConfig(
             fps=float(os.environ.get("RECORDER_FPS", RecorderConfig.fps)),

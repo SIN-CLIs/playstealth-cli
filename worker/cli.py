@@ -1,8 +1,8 @@
 # ================================================================================
 # DATEI: cli.py
 # PROJEKT: A2A-SIN-Worker-heyPiggy (OpenSIN AI Agent System)
-# ZWECK: 
-# WICHTIG FÜR ENTWICKLER: 
+# ZWECK:
+# WICHTIG FÜR ENTWICKLER:
 #   - Ändere nichts ohne zu verstehen was passiert
 #   - Jeder Kommentar erklärt WARUM etwas getan wird, nicht nur WAS
 #   - Bei Fragen erst Code lesen, dann ändern
@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final
 
@@ -90,6 +91,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Initialise config + preflight only, then exit without driving the bridge.",
     )
 
+    # --- sync-envs ---------------------------------------------------------
+    sync = sub.add_parser(
+        "sync-envs",
+        help="Normalize and upload env/secret files to Infisical.",
+    )
+    sync.add_argument(
+        "--root",
+        action="append",
+        dest="roots",
+        default=[],
+        help="Root directory to scan (repeatable). Defaults to the repo root.",
+    )
+    sync.add_argument(
+        "--env",
+        default=os.getenv("INFISICAL_ENV", "dev"),
+        help="Target Infisical environment slug (default: dev or $INFISICAL_ENV).",
+    )
+    sync.add_argument(
+        "--path",
+        default=os.getenv("INFISICAL_FOLDER_ROOT", "/opensin/a2a-sin-worker-heypiggy"),
+        help="Target Infisical folder root (default: current repo folder root).",
+    )
+
     # --- doctor ------------------------------------------------------------
     sub.add_parser(
         "doctor",
@@ -127,6 +151,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "doctor":
         return _run_doctor(log)
 
+    if command == "sync-envs":
+        return _run_infisical_sync(args, log)
+
     if command == "run":
         return _run_worker(args, log)
 
@@ -142,6 +169,7 @@ def _run_worker(args: argparse.Namespace, log: BoundLogger) -> int:
     from config import load_config_from_env  # legacy module
     from worker.context import WorkerContext
     from worker.loop import run_worker
+    from infisical_sync import sync_roots
 
     if args.run_id:
         os.environ["HEYPIGGY_RUN_ID"] = args.run_id
@@ -157,6 +185,12 @@ def _run_worker(args: argparse.Namespace, log: BoundLogger) -> int:
         return _EXIT_CONFIG_ERROR
 
     set_run_id(cfg.artifacts.run_id)
+
+    # WHY: If the operator enabled auto-sync, we normalize local env files into
+    # Infisical before the run starts so the worker and sibling agents share the
+    # same source of truth.
+    if cfg.infisical.enabled and cfg.infisical.auto_sync:
+        _maybe_auto_sync_infisical(cfg, log, sync_roots)
 
     with WorkerContext.from_config(cfg) as ctx:
         log.info(
@@ -205,6 +239,15 @@ def _run_doctor(log: BoundLogger) -> int:
     required_env = ("NVIDIA_API_KEY", "HEYPIGGY_EMAIL", "HEYPIGGY_PASSWORD")
     missing = [name for name in required_env if not os.environ.get(name)]
 
+    infisical_env = {
+        "INFISICAL_TOKEN": bool(
+            os.environ.get("INFISICAL_TOKEN") or os.environ.get("INFISICAL_SERVICE_TOKEN")
+        ),
+        "INFISICAL_PROJECT_ID": bool(os.environ.get("INFISICAL_PROJECT_ID")),
+        "INFISICAL_ENV": bool(os.environ.get("INFISICAL_ENV")),
+        "INFISICAL_FOLDER_ROOT": bool(os.environ.get("INFISICAL_FOLDER_ROOT")),
+    }
+
     # Optional deps
     def _probe(module_name: str) -> str:
         try:
@@ -223,6 +266,7 @@ def _run_doctor(log: BoundLogger) -> int:
         "python": sys.version.split()[0],
         "platform": sys.platform,
         "missing_env": missing,
+        "infisical": infisical_env,
         "modules": modules,
     }
 
@@ -234,10 +278,74 @@ def _run_doctor(log: BoundLogger) -> int:
         print(f"  missing required env: {', '.join(missing)}")
     else:
         print("  required env: ok")
+    print("  infisical:")
+    for name, present in infisical_env.items():
+        print(f"    {name}: {'ok' if present else 'missing'}")
     for mod, status in modules.items():
         print(f"  {mod}: {status}")
 
     return _EXIT_CONFIG_ERROR if missing else _EXIT_OK
+
+
+def _run_infisical_sync(args: argparse.Namespace, log: BoundLogger) -> int:
+    """Normalize and upload env files into Infisical.
+
+    WHY: This gives the operator a single explicit command to collapse local
+    env sprawl into the canonical vault before agents start consuming it.
+    """
+    from infisical_sync import sync_roots
+
+    token = os.environ.get("INFISICAL_TOKEN") or os.environ.get("INFISICAL_SERVICE_TOKEN")
+    if not token:
+        log.error("infisical_token_missing")
+        print("INFISICAL_TOKEN missing; set it in the shell or via the Infisical CLI login.")
+        return _EXIT_CONFIG_ERROR
+
+    roots = [
+        Path(root).expanduser() for root in (args.roots or [Path(__file__).resolve().parents[1]])
+    ]
+    repo_name = Path(__file__).resolve().parents[1].name
+    results = sync_roots(
+        roots,
+        token=token,
+        project_id=os.environ.get("INFISICAL_PROJECT_ID", "fa7758b4-f84c-4297-966e-710056d531ef"),
+        environment=args.env,
+        folder_root=args.path,
+        repo=repo_name,
+        agent_id=os.environ.get("BRAIN_AGENT_ID", "a2a-sin-worker-heypiggy"),
+        branch=os.environ.get("GIT_BRANCH", os.environ.get("BRANCH_NAME", "main")),
+    )
+    log.info("infisical_sync_completed", roots=len(roots), files=len(results))
+    print(f"synced {len(results)} env files to Infisical")
+    return _EXIT_OK
+
+
+def _maybe_auto_sync_infisical(cfg: object, log: BoundLogger, sync_roots_fn) -> None:
+    """Best-effort auto-sync hook used at worker startup.
+
+    WHY: If auto-sync is enabled, we want to collapse local env state into
+    Infisical before the worker touches the bridge. This keeps agents aligned.
+    """
+    try:
+        token = os.environ.get("INFISICAL_TOKEN") or os.environ.get("INFISICAL_SERVICE_TOKEN")
+        if not token:
+            log.warning("infisical_auto_sync_skipped", reason="missing token")
+            return
+        repo_root = Path(__file__).resolve().parents[1]
+        roots = list(getattr(cfg.infisical, "sync_roots", ()) or (repo_root,))
+        sync_roots_fn(
+            roots,
+            token=token,
+            project_id=getattr(cfg.infisical, "project_id"),
+            environment=getattr(cfg.infisical, "environment"),
+            folder_root=getattr(cfg.infisical, "folder_root"),
+            repo=repo_root.name,
+            agent_id=getattr(cfg.persona, "brain_agent_id", "a2a-sin-worker-heypiggy"),
+            branch=os.environ.get("GIT_BRANCH", os.environ.get("BRANCH_NAME", "main")),
+        )
+        log.info("infisical_auto_sync_completed", roots=len(roots))
+    except Exception as exc:  # pragma: no cover - best effort only
+        log.warning("infisical_auto_sync_failed", error=type(exc).__name__, error_message=str(exc))
 
 
 __all__ = ["main"]

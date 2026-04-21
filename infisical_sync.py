@@ -19,20 +19,25 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 from global_brain_client import GlobalBrainClient
 from global_brain_policy import (
     InfisicalTarget,
     SecretDetection,
     SecretSource,
-    build_secret_fact,
     ingest_secret_event,
     normalize_env_key,
 )
 
 
 _YAML_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*:\s*.*$")
+
+
+def _slugify_segment(text: str) -> str:
+    """Turn a folder/repo name into a stable Infisical path segment."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", text.lower()).strip("-")
+    return re.sub(r"-+", "-", cleaned) or "env"
 
 
 @dataclass(slots=True)
@@ -198,6 +203,8 @@ def sync_roots(
     for root in roots:
         if not root.exists():
             continue
+        repo_slug = _slugify_segment(root.name)
+        target_repo_root = f"{folder_root.rstrip('/')}/{repo_slug}".rstrip("/")
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
@@ -211,10 +218,16 @@ def sync_roots(
                 continue
             if any(part in {".git", "node_modules", ".cache", ".bun"} for part in path.parts):
                 continue
+            rel_dir = path.parent.relative_to(root)
+            target_folder = target_repo_root
+            if str(rel_dir) != ".":
+                target_folder = (
+                    f"{target_repo_root}/{_slugify_segment(str(rel_dir).replace('\\', '/'))}"
+                )
             target = InfisicalTarget(
                 project_id=project_id,
                 environment=environment,
-                folder=folder_root,
+                folder=target_folder,
             )
             results.append(
                 sync_env_file_to_infisical(

@@ -96,3 +96,39 @@ def test_run_with_run_id_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         rc = main(["run", "--run-id", "custom-123", "--dry-run"])
 
     assert rc == 0
+
+
+def test_sync_envs_requires_infisical_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INFISICAL_TOKEN", raising=False)
+    monkeypatch.delenv("INFISICAL_SERVICE_TOKEN", raising=False)
+
+    out = io.StringIO()
+    err = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = main(["sync-envs"])
+
+    assert rc == 2
+    assert "INFISICAL_TOKEN" in (out.getvalue() + err.getvalue())
+
+
+def test_sync_envs_invokes_infisical_sync(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("INFISICAL_TOKEN", "token-123")
+    monkeypatch.setenv("INFISICAL_PROJECT_ID", "proj-123")
+
+    calls = {}
+
+    def fake_sync_roots(roots, **kwargs):
+        calls["roots"] = [str(root) for root in roots]
+        calls.update(kwargs)
+        return [object()]
+
+    monkeypatch.setattr("infisical_sync.sync_roots", fake_sync_roots)
+
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        rc = main(["sync-envs", "--root", str(tmp_path), "--env", "dev", "--path", "/opensin/test"])
+
+    assert rc == 0
+    assert calls["roots"] == [str(tmp_path)]
+    assert calls["project_id"] == "proj-123"
+    assert calls["environment"] == "dev"
+    assert calls["folder_root"] == "/opensin/test"

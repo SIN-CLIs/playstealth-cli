@@ -19,6 +19,7 @@ from unittest.mock import patch
 from config import (
     ArtifactConfig,
     BridgeConfig,
+    InfisicalConfig,
     VisionConfig,
     WorkerConfig,
     load_config_from_env,
@@ -60,6 +61,9 @@ class WorkerConfigTests(unittest.TestCase):
         self.assertIn("click_element", cfg.click_actions)
         self.assertIn("vision_click", cfg.click_actions)
         self.assertFalse(cfg.opensin_v2)
+        self.assertIsInstance(cfg.infisical, InfisicalConfig)
+        self.assertTrue(cfg.infisical.enabled)
+        self.assertEqual(cfg.infisical.folder_root, "/opensin/a2a-sin-worker-heypiggy")
 
     def test_config_objects_are_frozen_against_runtime_mutation(self):
         # -------------------------------------------------------------------------
@@ -188,6 +192,13 @@ class LoadConfigFromEnvTests(unittest.TestCase):
                 "HEYPIGGY_RUN_ID": "manual-run-id",
                 "HEYPIGGY_ARTIFACT_BASE": "/var/tmp/heypiggy",
                 "OPENSIN_V2": "1",
+                "INFISICAL_ENABLED": "1",
+                "INFISICAL_DOMAIN": "https://eu.infisical.com",
+                "INFISICAL_PROJECT_ID": "proj-123",
+                "INFISICAL_ENV": "prod",
+                "INFISICAL_FOLDER_ROOT": "/opensin/test-agent",
+                "INFISICAL_AUTO_SYNC": "1",
+                "INFISICAL_SYNC_ROOTS": "/Users/jeremy/dev/A2A-SIN-Worker-heypiggy,/Users/jeremy/dev/OpenSIN-Bridge",
             },
             clear=True,
         ):
@@ -220,6 +231,16 @@ class LoadConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(cfg.artifacts.run_id, "manual-run-id")
         self.assertEqual(cfg.artifacts.base_dir, "/var/tmp/heypiggy")
         self.assertTrue(cfg.opensin_v2)
+        self.assertTrue(cfg.infisical.enabled)
+        self.assertEqual(cfg.infisical.domain, "https://eu.infisical.com")
+        self.assertEqual(cfg.infisical.project_id, "proj-123")
+        self.assertEqual(cfg.infisical.environment, "prod")
+        self.assertEqual(cfg.infisical.folder_root, "/opensin/test-agent")
+        self.assertTrue(cfg.infisical.auto_sync)
+        self.assertEqual(
+            cfg.infisical.sync_roots,
+            ("/Users/jeremy/dev/A2A-SIN-Worker-heypiggy", "/Users/jeremy/dev/OpenSIN-Bridge"),
+        )
 
     def test_load_config_from_env_reads_saved_env_file_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
