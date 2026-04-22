@@ -37,13 +37,18 @@ from playwright_stealth_worker import (
 
 from playstealth_actions.answer_survey import run as answer_survey_run
 from playstealth_actions.click_survey import run as click_survey_run
+from playstealth_actions.click_card import run as click_card_run
 from playstealth_actions.consent_modal import run as consent_modal_run
+from playstealth_actions.browser_bootstrap import open_browser as open_browser_run
+from playstealth_actions.inspect_modal import run as inspect_modal_run
 from playstealth_actions.inspect_survey import run as inspect_survey_run
+from playstealth_actions.list_cards import print_cards as print_cards_run
 from playstealth_actions.page_utils import resolve_active_page
 from playstealth_actions.open_list import run as open_list_run
 from playstealth_actions.radio_question import run as radio_question_run
 from playstealth_actions.survey_state import create_state
 from playstealth_actions.run_survey import run as run_survey_run
+from playstealth_actions.wait_question import run as wait_question_run
 
 WINDOW_WIDTH = 1024
 WINDOW_HEIGHT = 768
@@ -99,30 +104,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _open_browser():
-    profile_root = prepare_playwright_user_data_dir()
-    profile_dir = detect_chrome_profile_dir()
-
-    playwright = await async_playwright().start()
-    context = await playwright.chromium.launch_persistent_context(
-        user_data_dir=str(profile_root),
-        channel="chrome",
-        headless=False,
-        args=[
-            f"--window-size={WINDOW_WIDTH},{WINDOW_HEIGHT}",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-sandbox",
-            f"--profile-directory={profile_dir}",
-        ],
-    )
-    page = context.pages[0] if context.pages else await context.new_page()
-    await page.set_viewport_size({"width": WINDOW_WIDTH, "height": WINDOW_HEIGHT})
-
-    stealth = Stealth()
-    await stealth.apply_stealth_async(page)
-    await page.goto(HEYPIGGY_URL)
-    await page.wait_for_load_state("domcontentloaded")
-    return playwright, context, page
+    return await open_browser_run()
 
 
 async def _wait_for_list(page, timeout_seconds: int) -> bool:
@@ -130,98 +112,11 @@ async def _wait_for_list(page, timeout_seconds: int) -> bool:
 
 
 async def _print_cards(page, context) -> list[dict[str, str]]:
-    if page.is_closed() and context.pages:
-        page = context.pages[0]
-    body_text = await page.locator("body").inner_text(timeout=3000)
-    print(f"🧾 Body: {body_text[:250]!r}")
-    cards = page.locator("#survey_list .survey-item")
-    count = await cards.count()
-    print(f"🪪 Survey cards: {count}")
-    scored: list[dict[str, str]] = []
-    for i in range(min(count, 20)):
-        card = cards.nth(i)
-        if not await card.is_visible():
-            continue
-        score, meta = await _score_open_survey_candidate(card)
-        print(f"🎯 Card[{i}]: score={score} text={meta['text'][:90]!r}")
-        scored.append({"index": str(i), "score": str(score), **meta})
-    return scored
+    return await print_cards_run(page, context)
 
 
 async def _click_card(page, index: int):
-    cards = page.locator("#survey_list .survey-item")
-    count = await cards.count()
-    if count == 0:
-        raise RuntimeError("No survey cards found")
-
-    try:
-        fn_src = await page.evaluate(
-            "() => (window.clickSurvey ? window.clickSurvey.toString() : 'missing')"
-        )
-        print(f"🧪 clickSurvey src: {fn_src[:1200]!r}")
-        survey_list_probe = await page.evaluate(
-            """
-            () => {
-              const list = window.acctualSurveyList;
-              const first = Array.isArray(list) && list.length ? list[0] : null;
-              return {
-                hasList: Array.isArray(list),
-                length: Array.isArray(list) ? list.length : 0,
-                firstType: first ? typeof first.id : 'none',
-                firstId: first ? first.id : null,
-                firstKeys: first ? Object.keys(first).slice(0, 12) : [],
-              };
-            }
-            """
-        )
-        print(f"🧪 surveyList probe: {survey_list_probe}")
-    except Exception as fn_error:
-        print(f"⚠️ clickSurvey-src fehlgeschlagen: {fn_error}")
-
-    best = cards.nth(min(index, count - 1))
-    onclick = await best.get_attribute("onclick") or ""
-    await best.scroll_into_view_if_needed(timeout=4000)
-    try:
-        await best.dispatch_event("click")
-    except Exception:
-        await best.click(timeout=4000, force=True)
-
-    await asyncio.sleep(2)
-    print(f"📄 URL nach Klick: {page.url}")
-    if "clickSurvey(" in onclick:
-        sid = onclick.split("clickSurvey('")[1].split("')")[0]
-        print(f"🧷 card onclick survey id: {sid}")
-        result = await page.evaluate("sid => clickSurvey(sid)", sid)
-        print(f"🧠 clickSurvey result: {result!r}")
-        await asyncio.sleep(3)
-        page_urls = [pg.url for pg in page.context.pages]
-        print(f"🪟 Pages nach clickSurvey: {page_urls}")
-        try:
-            overlays = await page.evaluate(
-                """
-                () => Array.from(document.querySelectorAll('iframe, [role="dialog"], .modal, .overlay'))
-                  .map(el => ({
-                    tag: el.tagName,
-                    id: el.id || '',
-                    cls: el.className || '',
-                    text: (el.innerText || '').trim().slice(0, 120),
-                    visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
-                  }))
-                """
-            )
-            print(f"🪟 Overlays/Iframes: {overlays}")
-        except Exception as overlay_error:
-            print(f"⚠️ Overlay-Scan fehlgeschlagen: {overlay_error}")
-        print(f"📄 URL nach clickSurvey: {page.url}")
-    await asyncio.sleep(1)
-    if len(page.context.pages) > 1:
-        for candidate in reversed(page.context.pages):
-            if not candidate.is_closed() and candidate.url != "about:blank":
-                print(f"🪟 Active page after click: {candidate.url}")
-                return candidate
-        print(f"🪟 Active page after click: {page.context.pages[-1].url}")
-        return page.context.pages[-1]
-    return page
+    return await click_card_run(page, index)
 
 
 async def _resolve_active_page(page):
@@ -230,68 +125,7 @@ async def _resolve_active_page(page):
 
 
 async def _inspect_survey(page) -> None:
-    """Dump the visible survey modal so we can wire the next CLI step."""
-    modal = page.locator("#survey-modal")
-    try:
-        visible = await modal.is_visible()
-        print(f"🪟 survey-modal visible: {visible}")
-        if visible:
-            print(f"🧾 survey-modal text: {(await modal.inner_text(timeout=3000))[:600]!r}")
-            controls = modal.locator("button, input, label, [role='button']")
-            count = await controls.count()
-            print(f"🎛️ survey-modal controls: {count}")
-            for i in range(min(count, 24)):
-                ctl = controls.nth(i)
-                try:
-                    txt = (await ctl.inner_text(timeout=1200)).strip()
-                except Exception:
-                    txt = ""
-                try:
-                    val = await ctl.get_attribute("value") or ""
-                except Exception:
-                    val = ""
-                try:
-                    outer = await ctl.evaluate(
-                        "el => ({tag: el.tagName, id: el.id || '', cls: el.className || '', name: el.getAttribute('name') || '', onclick: el.getAttribute('onclick') || '', type: el.getAttribute('type') || '', text: (el.innerText || '').trim().slice(0, 120), html: el.outerHTML.slice(0, 300)})"
-                    )
-                except Exception:
-                    outer = {
-                        "tag": "?",
-                        "id": "",
-                        "cls": "",
-                        "name": "",
-                        "onclick": "",
-                        "type": "",
-                        "text": txt[:120],
-                        "html": "",
-                    }
-                print(f"   • control[{i}]: {outer}")
-        try:
-            iframe = page.locator("iframe#frameurl")
-            if await iframe.count() > 0:
-                print(f"🧩 frameurl src: {await iframe.first.get_attribute('src')!r}")
-                print(f"🧩 frameurl name: {await iframe.first.get_attribute('name')!r}")
-                print(
-                    f"🧩 frameurl outer: {(await iframe.first.evaluate('el => el.outerHTML.slice(0, 300)'))!r}"
-                )
-        except Exception as iframe_error:
-            print(f"⚠️ frameurl inspect failed: {iframe_error}")
-        frames = page.frames
-        print(f"🪟 frames: {len(frames)}")
-        for i, frame in enumerate(frames[:6]):
-            try:
-                frame_url = frame.url
-            except Exception:
-                frame_url = "<unavailable>"
-            print(f"   • frame[{i}] url={frame_url}")
-            if frame_url and "frameurl" in frame_url:
-                try:
-                    txt = await frame.locator("body").inner_text(timeout=3000)
-                    print(f"   • frame[{i}] body: {txt[:500]!r}")
-                except Exception as frame_error:
-                    print(f"   • frame[{i}] body error: {frame_error}")
-    except Exception as inspect_error:
-        print(f"⚠️ Survey modal inspect failed: {inspect_error}")
+    return await inspect_modal_run(page)
 
 
 async def _answer_survey(page, option_index: int):
@@ -300,25 +134,7 @@ async def _answer_survey(page, option_index: int):
 
 
 async def _wait_for_question_state(page, timeout_seconds: int = 10) -> bool:
-    """Wait until the consent modal turns into a real question or iframe loads."""
-    deadline = asyncio.get_event_loop().time() + timeout_seconds
-    while asyncio.get_event_loop().time() < deadline:
-        try:
-            modal_text = (await page.locator("#survey-modal").inner_text(timeout=1000)).lower()
-        except Exception:
-            modal_text = ""
-        try:
-            iframe_src = await page.locator("iframe#frameurl").get_attribute("src") or ""
-        except Exception:
-            iframe_src = ""
-        if iframe_src.strip():
-            print(f"🧩 frameurl src became active: {iframe_src!r}")
-            return True
-        if "umfrage starten" not in modal_text and "du kannst jetzt" not in modal_text:
-            print(f"🧩 survey-modal changed: {modal_text[:200]!r}")
-            return True
-        await asyncio.sleep(1)
-    return False
+    return await wait_question_run(page, timeout_seconds)
 
 
 async def _run_open_list(timeout_seconds: int) -> int:
