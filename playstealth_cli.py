@@ -42,6 +42,7 @@ from playstealth_actions.inspect_survey import run as inspect_survey_run
 from playstealth_actions.page_utils import resolve_active_page
 from playstealth_actions.open_list import run as open_list_run
 from playstealth_actions.radio_question import run as radio_question_run
+from playstealth_actions.survey_state import create_state
 from playstealth_actions.run_survey import run as run_survey_run
 
 WINDOW_WIDTH = 1024
@@ -413,6 +414,7 @@ async def _run_answer_survey(timeout_seconds: int, index: int, option_index: int
 
 async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> int:
     playwright, context, page = await _open_browser()
+    state = create_state(index)
     try:
         if await _wait_for_list(page, timeout_seconds):
             print("✅ Login erkannt")
@@ -423,13 +425,21 @@ async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> 
         page = await _click_card(page, index)
         if page.is_closed() and context.pages:
             page = context.pages[-1]
+        state.mode = "opened"
+        state.current_url = page.url
+        state.tab_count = len(page.context.pages)
+        state.record("survey opened")
         page = await _resolve_active_page(page)
         try:
             page = await consent_modal_run(page)
+            state.record("consent handled")
         except Exception as consent_error:
             print(f"⚠️ Consent handling skipped/failed: {consent_error}")
 
         for step in range(max_steps):
+            state.step = step + 1
+            state.current_url = page.url
+            state.tab_count = len(page.context.pages)
             await asyncio.sleep(1.5)
             modal = page.locator("#survey-modal")
             if not await modal.is_visible():
@@ -457,10 +467,15 @@ async def _run_survey_loop(timeout_seconds: int, index: int, max_steps: int) -> 
                     print(f"⚠️ Post-start iframe error: {iframe_error}")
                 break
             print(f"🔁 Survey step {step + 1}/{max_steps}")
+            state.record(f"step_{step + 1}")
             await _inspect_survey(page)
             page = await _answer_survey(page, 0)
+            state.current_url = page.url
+            state.tab_count = len(page.context.pages)
+            print(f"🧭 State snapshot: {state.snapshot()}")
         return 0
     finally:
+        print(f"🧭 Final state: {state.snapshot()}")
         try:
             await context.close()
         except Exception:
