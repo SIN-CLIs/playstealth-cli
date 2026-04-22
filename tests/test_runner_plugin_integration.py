@@ -69,3 +69,39 @@ async def test_execute_survey_flow_uses_plugin_path(page, monkeypatch, tmp_path)
     assert result["success"] is True
     assert result["steps_completed"] == 1
     assert await page.eval_on_selector("input[value='2']", "el => el.checked") is True
+
+
+@pytest.mark.asyncio
+async def test_execute_survey_flow_generic_path_respects_attention_check(page, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PLAYSTEALTH_STATE_DIR", str(tmp_path))
+
+    await page.set_content(
+        """
+        <html><body>
+          <div class='question-title'>Bitte wählen Sie die zweite Option.</div>
+          <label name='answerOption'><input type='radio' name='q1' value='1' /> Erste Option</label>
+          <label name='answerOption'><input type='radio' name='q1' value='2' /> Zweite Option</label>
+          <button type='button' id='next-step' onclick="window.__clicked = true">Weiter</button>
+        </body></html>
+        """
+    )
+
+    monkeypatch.setattr("playstealth_actions.simple_survey_runner.load_plugins", lambda: [])
+
+    async def _detect_platform(page, plugins):
+        raise ValueError("no plugin")
+
+    monkeypatch.setattr("playstealth_actions.simple_survey_runner.detect_platform", _detect_platform)
+
+    result = await execute_survey_flow(
+        page=page,
+        context=FakeContext(),
+        start_url="about:blank",
+        max_steps=1,
+        session_id="generic_test",
+        strategy_name="persona",
+        strategy_persona="neutral",
+    )
+
+    assert result["success"] is True
+    assert await page.eval_on_selector("input[value='2']", "el => el.checked") is True

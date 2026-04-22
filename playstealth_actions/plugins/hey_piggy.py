@@ -26,9 +26,11 @@ class HeyPiggyPlatform(BasePlatform):
         return False
 
     async def get_current_step(self, page: Page):
-        q_loc = page.locator(".question-title, h2, .q-text, [class*='question']").first
+        q_loc = page.locator(".question-title, h1, h2, .q-text, [class*='question']").first
         q_text = await q_loc.inner_text(timeout=4000)
-        opts = await page.locator("input[type='radio'], input[type='checkbox'], .option-btn, [role='radio']").all()
+        opts = await page.locator(
+            "input[type='radio'], input[type='checkbox'], .option-btn, [role='radio'], [role='checkbox']"
+        ).all()
         return {"question": q_text.strip(), "option_count": len(opts), "type": "hey_piggy_choice"}
 
     async def answer_question(self, page: Page, answer_data) -> bool:

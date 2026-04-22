@@ -1,4 +1,11 @@
-"""Dashboard Flow Orchestrator for complete survey automation loop."""
+"""Dashboard Flow Orchestrator for complete survey automation loop.
+
+WICHTIG:
+- Dieser Pfad ist für Dashboard → Survey Discovery → Completion gedacht.
+- Er teilt dieselben Kernbausteine wie der einfache Survey-Runner
+  (Strategien, Trap-Detection, Telemetrie), weil beides am Ende dieselbe
+  Aufgabe lösen soll: zuverlässig echte Surveys ausfüllen.
+"""
 
 import asyncio
 import os
@@ -115,8 +122,30 @@ async def run_dashboard_flow(
                 await page.goto(dashboard_url, wait_until="domcontentloaded")
                 await page.wait_for_load_state("networkidle")
 
-                # Finde verfügbare Umfrage
-                survey_loc = await _dynamic_resolve(page, "start", max_retries=2)
+                # Finde verfügbare Umfrage.
+                # Minimal, aber robuster als nur nach "start" zu suchen:
+                # zuerst sichtbare Reward-/Survey-Karten, dann textbasierte Fallbacks.
+                survey_loc = None
+                survey_selectors = [
+                    ".survey-card",
+                    ".survey-item",
+                    "[data-survey]",
+                    "button:has-text('Umfrage starten')",
+                    "a:has-text('Umfrage starten')",
+                ]
+                for selector in survey_selectors:
+                    candidate = page.locator(selector).first
+                    try:
+                        if await candidate.count() > 0 and await candidate.is_visible():
+                            survey_loc = candidate
+                            break
+                    except Exception:
+                        continue
+                if survey_loc is None:
+                    for query in ["Umfrage starten", "Start", "Survey", "Jetzt starten"]:
+                        survey_loc = await _dynamic_resolve(page, query, max_retries=2)
+                        if survey_loc is not None:
+                            break
                 if not survey_loc or await survey_loc.count() == 0:
                     print("⏳ No surveys available. Waiting...")
                     await inter_survey_break(min_min=10, max_min=30)

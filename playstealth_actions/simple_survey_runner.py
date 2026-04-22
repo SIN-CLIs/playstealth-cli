@@ -40,6 +40,38 @@ async def _extract_option_texts(page: Page) -> list[str]:
     return texts
 
 
+async def _read_question_text(page: Page, platform=None) -> str:
+    """Read the current question text from platform hooks or generic selectors."""
+    if platform is not None:
+        try:
+            step = await platform.get_current_step(page)
+            text = str(step.get("question", "")).strip()
+            if text:
+                return text
+        except Exception:
+            pass
+
+    selectors = [
+        ".question-title",
+        "h1",
+        "h2",
+        "h3",
+        ".QuestionText",
+        ".q-text",
+        "[class*='question']",
+    ]
+    for selector in selectors:
+        loc = page.locator(selector).first
+        try:
+            if await loc.count() > 0:
+                text = (await loc.inner_text(timeout=1500)).strip()
+                if text:
+                    return text
+        except Exception:
+            continue
+    return ""
+
+
 async def run_survey_step(
     page: Page,
     step_index: int,
@@ -61,7 +93,8 @@ async def run_survey_step(
         # Wenn ein Plugin erkannt wurde, vertrauen wir stärker auf dessen
         # get_current_step()-Logik und nicht nur auf generische Schlüsselwörter.
         page_content = await page.content()
-        if platform is None and "survey" not in page_content.lower() and "question" not in page_content.lower():
+        question_hint = await _read_question_text(page, platform)
+        if platform is None and "survey" not in page_content.lower() and "question" not in page_content.lower() and not question_hint:
             print(f"   ℹ️  Step {step_index}: Keine Survey-Elemente erkannt - möglicherweise beendet")
             return False
 
@@ -69,7 +102,7 @@ async def run_survey_step(
         if platform is not None:
             try:
                 step = await platform.get_current_step(page)
-                question_text = step.get("question", "")
+                question_text = step.get("question", "") or question_hint
                 option_count = int(step.get("option_count", 0))
                 option_texts = await _extract_option_texts(page)
                 trap = await analyze_page_traps(page, question_text, option_texts)
@@ -125,27 +158,12 @@ async def run_survey_step(
                 # gerutscht sind.
                 print(f"   ⚠️  Plugin-Pfad fehlgeschlagen: {e}")
         
-        # Typische Survey-Elemente finden und interagieren
-        # Priorität: Weiter-Buttons → Antwort-Optionen → Input-Felder
-        
-        # 1. Nach "Weiter" / "Next" Buttons suchen
+        # Typische Survey-Elemente finden und interagieren.
+        # WICHTIG: Antworten kommen vor "Weiter", sonst würden wir zu früh
+        # navigieren und Questions ohne Antwort überspringen.
         next_buttons = ["Weiter", "Next", "Continue", "Fortfahren", "→", "»"]
-        for btn_text in next_buttons:
-            if await safe_click(page, btn_text):
-                print(f"   ✓ Step {step_index}: '{btn_text}' geklickt")
-                await medium_delay()
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                log_event(
-                    session_id or "unknown",
-                    "step_end",
-                    step_index=step_index,
-                    duration_ms=duration_ms,
-                    success=True,
-                    metadata={"action": f"clicked_{btn_text}"},
-                )
-                return True
-        
-        # 2. Nach Radio-Buttons / Checkboxen suchen (Antwort-Optionen)
+
+        # 1. Nach Radio-Buttons / Checkboxen suchen (Antwort-Optionen)
         radio_selectors = [
             'input[type="radio"]',
             'input[type="checkbox"]',
@@ -159,8 +177,17 @@ async def run_survey_step(
                 count = await options.count()
                 if count > 0:
                     # Zufällige Option wählen (nicht immer die erste)
-                    import random
-                    option_index = random.randint(0, min(count - 1, 2))  # Max Index 2
+                    question_text = question_hint or await _read_question_text(page, platform)
+                    option_texts = await _extract_option_texts(page)
+                    trap = await analyze_page_traps(page, question_text, option_texts)
+                    if trap["attention_check"] and trap["attention_check"].get("action") == "select_index":
+                        option_index = int(trap["attention_check"]["index"])
+                    elif strategy is not None:
+                        option_index = await strategy.choose(question_text, count, option_texts)
+                    else:
+                        import random
+                        option_index = random.randint(0, min(count - 1, 2))  # Max Index 2
+                    option_index = max(0, min(int(option_index), count - 1))
                     await options.nth(option_index).click()
                     await fast_delay()
                     print(f"   ✓ Step {step_index}: Option {option_index + 1} gewählt ({selector})")
@@ -197,6 +224,23 @@ async def run_survey_step(
                     return True
             except Exception:
                 continue
+
+        # 2. Nach "Weiter" / "Next" Buttons suchen
+        next_buttons = ["Weiter", "Next", "Continue", "Fortfahren", "→", "»"]
+        for btn_text in next_buttons:
+            if await safe_click(page, btn_text):
+                print(f"   ✓ Step {step_index}: '{btn_text}' geklickt")
+                await medium_delay()
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                log_event(
+                    session_id or "unknown",
+                    "step_end",
+                    step_index=step_index,
+                    duration_ms=duration_ms,
+                    success=True,
+                    metadata={"action": f"clicked_{btn_text}"},
+                )
+                return True
         
         # 3. Nach Text-Input Feldern suchen
         text_inputs = [
