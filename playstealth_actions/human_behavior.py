@@ -13,9 +13,8 @@ import asyncio
 import math
 import random
 from dataclasses import dataclass
-from typing import Callable
 
-from playwright.async_api import Page
+from playwright.async_api import Locator, Page
 
 
 @dataclass
@@ -28,18 +27,8 @@ class Point:
 
 def bezier_curve(p0: Point, p1: Point, p2: Point, p3: Point, t: float) -> Point:
     """Calculate a point on a cubic Bézier curve at parameter t (0-1)."""
-    x = (
-        (1 - t) ** 3 * p0.x
-        + 3 * (1 - t) ** 2 * t * p1.x
-        + 3 * (1 - t) * t**2 * p2.x
-        + t**3 * p3.x
-    )
-    y = (
-        (1 - t) ** 3 * p0.y
-        + 3 * (1 - t) ** 2 * t * p1.y
-        + 3 * (1 - t) * t**2 * p2.y
-        + t**3 * p3.y
-    )
+    x = (1 - t) ** 3 * p0.x + 3 * (1 - t) ** 2 * t * p1.x + 3 * (1 - t) * t**2 * p2.x + t**3 * p3.x
+    y = (1 - t) ** 3 * p0.y + 3 * (1 - t) ** 2 * t * p1.y + 3 * (1 - t) * t**2 * p2.y + t**3 * p3.y
     return Point(x, y)
 
 
@@ -151,7 +140,7 @@ async def mouse_move_curve(page: Page, target_x: float, target_y: float, duratio
 
 async def human_click(
     page: Page,
-    selector: str,
+    selector: str | Locator,
     click_count: int = 1,
     button: str = "left",
     pre_click_delay: float = None,
@@ -178,7 +167,10 @@ async def human_click(
         True if click was executed, False if element not found
     """
     try:
-        element = await page.query_selector(selector)
+        if isinstance(selector, str):
+            element = await page.query_selector(selector)
+        else:
+            element = await selector.element_handle()
         if not element:
             return False
 
@@ -192,8 +184,12 @@ async def human_click(
             return False
 
         # Calculate click position with slight offset (humans don't click exact center)
-        click_x = box["x"] + box["width"] / 2 + random.uniform(-box["width"] * 0.2, box["width"] * 0.2)
-        click_y = box["y"] + box["height"] / 2 + random.uniform(-box["height"] * 0.2, box["height"] * 0.2)
+        click_x = (
+            box["x"] + box["width"] / 2 + random.uniform(-box["width"] * 0.2, box["width"] * 0.2)
+        )
+        click_y = (
+            box["y"] + box["height"] / 2 + random.uniform(-box["height"] * 0.2, box["height"] * 0.2)
+        )
 
         # Scroll element into view if needed
         await element.scroll_into_view_if_needed(timeout=3000)

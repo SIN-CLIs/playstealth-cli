@@ -1,1 +1,41 @@
-Nothing should be ignored based on the provided file changes. The only added file is README.md, which is a source/config file and should not be ignored.
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenvs / tooling
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Build outputs
+dist/
+build/
+target/
+*.egg-info/
+
+# Runtime state / local data
+.playstealth_state/
+.playstealth-artifacts/
+
+# Local environment files
+.env
+.env.local
+*.env.*
+!.env.example
+
+# Editors / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Coverage / logs
+.coverage
+coverage/
+htmlcov/
+*.log
+*.tmp
+*.swp

@@ -292,6 +292,35 @@ async def inject_advanced_stealth(page: Page, config: dict[str, Any] = None) -> 
         """
     )
 
+    # Apply a minimal subset immediately to the already-open page as well.
+    # add_init_script only affects future document loads, but our test suite and
+    # some live flows inspect the current page right after injection.
+    await page.evaluate(
+        """
+        () => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+          Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en', 'de-DE', 'de'],
+            configurable: true,
+          });
+          if (!window.chrome) {
+            window.chrome = { runtime: {} };
+          }
+        }
+        """
+    )
+
+
+async def apply_stealth_profile(context, profile: dict[str, Any] | None = None) -> None:
+    """Apply stealth to a browser context by priming a page with injections.
+
+    The existing codebase expects a context-level helper. We keep this wrapper so
+    older modules continue to work while the actual stealth logic stays in the
+    page-level injector above.
+    """
+    page = context.pages[0] if context.pages else await context.new_page()
+    await inject_advanced_stealth(page, profile or {})
+
 
 async def apply_timezone_spoof(page: Page, target_timezone: str = None) -> None:
     """Apply timezone spoofing to match proxy location.
@@ -302,7 +331,7 @@ async def apply_timezone_spoof(page: Page, target_timezone: str = None) -> None:
     """
     if target_timezone is None:
         # Use system timezone
-        target_timezone = timezone.utc.tzname(None) or 'UTC'
+        target_timezone = timezone.utc.tzname(None) or "UTC"
 
     await page.add_init_script(
         f"""
@@ -383,6 +412,7 @@ async def detect_leaks(page: Page) -> dict[str, bool]:
         "() => navigator.webdriver === true || navigator.webdriver === 'true'"
     )
     results["webdriver_property"] = webdriver_leak
+    results["webdriver"] = webdriver_leak
 
     # Test 2: Check for headless Chrome indicators
     headless_indicators = await page.evaluate(
@@ -469,7 +499,7 @@ async def detect_leaks(page: Page) -> dict[str, bool]:
     results["canvas_fingerprint"] = canvas_leak
 
     # Test 5: Check permissions API
-    permissions_leak = await page.evaluate(
+    await page.evaluate(
         """
         () => {
             if (!navigator.permissions) return false;
@@ -482,6 +512,7 @@ async def detect_leaks(page: Page) -> dict[str, bool]:
     )
     # Note: This is async, so we'll mark it as unknown for now
     results["permissions_api"] = False  # Would need proper async handling
+    results["critical_leaks"] = results["webdriver_property"] or results["headless_indicators"]
 
     return results
 
@@ -507,8 +538,6 @@ def generate_user_agent(os_type: str = None, browser_type: str = "chrome") -> st
         "117.0.5938.149",
     ]
     chrome_version = random.choice(chrome_versions)
-    major_version = chrome_version.split(".")[0]
-
     if os_type == "windows":
         windows_versions = ["10.0", "11.0"]
         win_version = random.choice(windows_versions)

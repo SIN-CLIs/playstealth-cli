@@ -1,98 +1,119 @@
-"""Survey Answer Strategies Module.
+"""Survey answer strategies for PlayStealth.
 
-Steuert Antwortmuster pro Session. Vollständig deterministisch bei `persona`,
-zufällig bei `random`, stabil bei `consistent`.
+This module keeps strategy selection explicit and auditable. The CLI can switch
+between random, consistent, and persona-aware behavior without rewriting the
+actual survey flow.
 """
-import random
+
+from __future__ import annotations
+
 import hashlib
+import random
 from abc import ABC, abstractmethod
-from typing import List, Union, Optional
+from typing import Any
+
+from playstealth_actions.persona_manager import DEFAULT_PERSONA, get_persona
+
+
+def _persona_heuristic_indices(
+    question: str, options: list[str], persona: dict[str, Any]
+) -> list[int]:
+    """Return persona-driven preferred indices for a question when obvious."""
+    q = question.lower()
+    lowered = [option.lower() for option in options]
+
+    if "zigaretten" in q or "rauche" in q:
+        for idx, option in enumerate(lowered):
+            if "ich rauche keine zigaretten" in option or "nichts des oben genannten" in option:
+                return [idx]
+
+    gender = str(persona.get("gender", "male")).lower()
+    if "geschlecht" in q or "gender" in q:
+        target = "männlich" if gender == "male" else "weiblich"
+        for idx, option in enumerate(lowered):
+            if target in option:
+                return [idx]
+
+    age = str(persona.get("age", ""))
+    if age and "alter" in q:
+        for idx, option in enumerate(lowered):
+            if age in option:
+                return [idx]
+
+    interests = [str(item).lower() for item in persona.get("interests", [])]
+    if interests and ("interessen" in q or "hobb" in q):
+        matches = [
+            idx
+            for idx, option in enumerate(lowered)
+            if any(interest in option for interest in interests)
+        ]
+        if matches:
+            return matches[:3]
+
+    return []
 
 
 class BaseStrategy(ABC):
-    """Basis-Klasse für alle Antwort-Strategien."""
-    
+    """Base class for answer selection strategies."""
+
     @abstractmethod
-    async def choose(self, question: str, option_count: int, options: List[str]) -> Union[int, str]:
-        """Gibt Index oder Text der zu wählenden Option zurück."""
-        pass
+    async def choose(self, question: str, option_count: int, options: list[str]) -> int:
+        """Return the preferred option index."""
 
 
 class RandomStrategy(BaseStrategy):
-    """Wählt Antworten komplett zufällig."""
-    
-    async def choose(self, question: str, option_count: int, options: List[str]) -> Union[int, str]:
+    """Choose answers completely at random."""
+
+    async def choose(self, question: str, option_count: int, options: list[str]) -> int:
         if option_count == 0:
             return 0
         return random.randint(0, option_count - 1)
 
 
 class ConsistentStrategy(BaseStrategy):
-    """Wählt immer denselben Index (z.B. immer die zweite Option)."""
-    
-    def __init__(self, fixed_index: int = 1):
+    """Choose the same option index every time."""
+
+    def __init__(self, fixed_index: int = 1) -> None:
         self.fixed_index = fixed_index
 
-    async def choose(self, question: str, option_count: int, options: List[str]) -> Union[int, str]:
+    async def choose(self, question: str, option_count: int, options: list[str]) -> int:
         if option_count == 0:
             return 0
         return min(self.fixed_index, max(0, option_count - 1))
 
 
 class PersonaStrategy(BaseStrategy):
-    """Wählt basierend auf einem Profil (optimistic, critical, neutral).
-    
-    Deterministisch pro Frage (gleiche Frage = gleiche Antwort),
-    aber gewichtet nach Persona-Profil.
-    """
-    
-    def __init__(self, persona: str = "neutral"):
-        self.persona = persona
-        self.weights = {
-            "optimistic": [0.45, 0.30, 0.15, 0.07, 0.03],
-            "critical":   [0.03, 0.07, 0.15, 0.30, 0.45],
-            "neutral":    [0.10, 0.20, 0.40, 0.20, 0.10]
-        }.get(persona, [0.2] * 5)
+    """Choose stable, persona-aware answers.
 
-    async def choose(self, question: str, option_count: int, options: List[str]) -> Union[int, str]:
+    The strategy first tries explicit persona heuristics and then falls back to a
+    deterministic hash-based choice so repeated questions stay consistent.
+    """
+
+    def __init__(self, persona: str = "default") -> None:
+        self.persona_name = persona
+        self.persona = get_persona(persona) if persona != "default" else DEFAULT_PERSONA
+
+    async def choose(self, question: str, option_count: int, options: list[str]) -> int:
         if option_count == 0:
             return 0
-        
-        # Seed aus Frage-Text → gleiche Frage = gleiche Antwort (Konsistenz)
-        q_hash = int(hashlib.md5(question.encode()).hexdigest(), 16)
-        rng = random.Random(q_hash)
-        
-        # Gewichte auf tatsächliche Optionen zuschneiden
-        w = self.weights[:option_count]
-        total = sum(w)
-        if total == 0:
-            return rng.randint(0, option_count - 1)
-        
-        normalized = [x / total for x in w]
-        return rng.choices(range(option_count), weights=normalized, k=1)[0]
+
+        heuristics = _persona_heuristic_indices(question, options, self.persona)
+        if heuristics:
+            return heuristics[0]
+
+        question_hash = int(hashlib.md5(question.encode("utf-8")).hexdigest(), 16)
+        rng = random.Random(question_hash)
+        return rng.randint(0, option_count - 1)
 
 
 def get_strategy(name: str, **kwargs) -> BaseStrategy:
-    """Factory-Funktion zum Erstellen einer Strategie-Instanz.
-    
-    Args:
-        name: Name der Strategie ('random', 'consistent', 'persona')
-        **kwargs: Weitere Argumente für die Strategie (z.B. persona='optimistic')
-    
-    Returns:
-        Instanz der gewünschten Strategie
-    
-    Raises:
-        ValueError: Wenn unbekannter Strategie-Name
-    """
+    """Create a strategy instance by name."""
     strategies = {
         "random": RandomStrategy,
         "consistent": ConsistentStrategy,
-        "persona": PersonaStrategy
+        "persona": PersonaStrategy,
     }
-    
     cls = strategies.get(name)
     if not cls:
-        raise ValueError(f"❌ Unknown strategy: {name}. Available: {list(strategies.keys())}")
-    
+        raise ValueError(f"Unknown strategy: {name}. Available: {list(strategies.keys())}")
     return cls(**kwargs)
