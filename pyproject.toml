@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "playstealth-cli"
+version = "1.0.0"
+description = "Modular Playwright+Stealth CLI for resilient, human-like survey automation & diagnostics."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "SIN-CLIs", email = "contact@sin-clis.dev"}]
+maintainers = [{name = "SIN-CLIs", email = "contact@sin-clis.dev"}]
+keywords = ["playwright", "stealth", "automation", "survey", "cli", "resilience", "anti-detection", "human-like"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Operating System :: OS Independent"
+]
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.44.0",
+    "rich>=13.0.0",
+    "httpx>=0.27.0",
+    "PyJWT[crypto]>=2.8.0",
+    "python-dotenv>=1.0.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-playwright>=0.5", "ruff>=0.4", "mypy>=1.10"]
+
+[project.scripts]
+playstealth = "playstealth_cli:main"
+
+[project.urls]
+Homepage = "https://github.com/SIN-CLIs/playstealth-cli"
+Repository = "https://github.com/SIN-CLIs/playstealth-cli"
+Documentation = "https://github.com/SIN-CLIs/playstealth-cli#readme"
+Issues = "https://github.com/SIN-CLIs/playstealth-cli/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["playstealth_actions", "playstealth_cli.py"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
