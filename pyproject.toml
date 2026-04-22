@@ -28,7 +28,7 @@ classifiers = [
 ]
 dependencies = [
   # Image downscaling for NVIDIA NIM inline uploads (~180 KB limit).
-  "Pillow>=10.0.0,<12.0.0",
+  "Pillow>=10.0.0,<13.0.0",
   # Structured JSON logging with contextvars + secret redaction.
   "structlog>=24.1.0,<26.0.0",
 ]

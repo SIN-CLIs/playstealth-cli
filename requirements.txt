@@ -16,11 +16,11 @@
 
 # Image downscaling for NVIDIA NIM inline uploads (hard ~180 KB limit).
 # Without Pillow the vision path produces HTTP 400 on large screenshots.
-Pillow==11.0.0
+Pillow==12.2.0
 
 # Structured JSON logging with contextvars + secret redaction.
 # Replaces print() everywhere in the worker/ package.
-structlog==24.4.0
+structlog==25.5.0
 
 # Async HTTP client — benoetigt fuer media_router / audio_handler / video_handler
 # um Audio/Video-Assets von Survey-Seiten parallel herunterzuladen und die
