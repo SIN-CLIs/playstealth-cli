@@ -1,17 +1,46 @@
-# PlayStealth local/runtime files
-.DS_Store
+```
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.pytest_cache/
+.Python
+env/
+venv/
 .venv/
-*.egg-info/
-dist/
-build/
+.ENV
+.python-version
 
-# Local env and state
+# Build artifacts
+build/
+dist/
+*.egg
+*.egg-info/
+*.so
+
+# Testing
+.coverage
+coverage/
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+
+# Environment variables
 .env
-.env.*
-.playwright/
-.cache/
+.env.local
+*.env.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+```

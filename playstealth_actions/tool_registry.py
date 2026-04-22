@@ -148,6 +148,18 @@ TOOLS: list[ToolSpec] = [
         "implemented",
     ),
     ToolSpec("dump-state", "playstealth_actions.dump_state", "Dump session state", "implemented"),
+    ToolSpec(
+        "smart-click",
+        "playstealth_actions.smart_actions",
+        "Click with multi-strategy selector resolution",
+        "implemented",
+    ),
+    ToolSpec(
+        "check-stealth",
+        "playstealth_actions.stealth_enhancer",
+        "Run anti-detection leak checks",
+        "implemented",
+    ),
 ]
 
 
