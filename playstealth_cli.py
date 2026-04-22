@@ -39,6 +39,7 @@ from playstealth_actions.answer_survey import run as answer_survey_run
 from playstealth_actions.click_survey import run as click_survey_run
 from playstealth_actions.consent_modal import run as consent_modal_run
 from playstealth_actions.inspect_survey import run as inspect_survey_run
+from playstealth_actions.page_utils import resolve_active_page
 from playstealth_actions.open_list import run as open_list_run
 from playstealth_actions.radio_question import run as radio_question_run
 from playstealth_actions.run_survey import run as run_survey_run
@@ -223,16 +224,8 @@ async def _click_card(page, index: int):
 
 
 async def _resolve_active_page(page):
-    """Choose the newest non-blank page after a survey action."""
-    pages = [candidate for candidate in page.context.pages if not candidate.is_closed()]
-    if not pages:
-        return page
-    for candidate in reversed(pages):
-        if candidate.url and candidate.url != "about:blank":
-            if candidate != page:
-                print(f"🪟 Switching to active page: {candidate.url}")
-            return candidate
-    return pages[-1]
+    """Backward-compatible wrapper around the shared page helper."""
+    return await resolve_active_page(page)
 
 
 async def _inspect_survey(page) -> None:

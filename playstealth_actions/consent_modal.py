@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+from playstealth_actions.page_utils import resolve_active_page
+
 
 async def run(page):
     """Accept the consent modal and return the active page."""
@@ -25,6 +27,6 @@ async def run(page):
                 await btn.first.click(force=True)
             await asyncio.sleep(2)
             print(f"✅ Consent clicked via {selector}")
-            return page
+            return await resolve_active_page(page)
 
     raise RuntimeError("Consent modal found but no consent button matched")
