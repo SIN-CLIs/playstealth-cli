@@ -33,6 +33,13 @@ def create_parser():
         prog="playstealth",
         description="🔐 PlayStealth CLI - Weltbeste CLI für Hacker (Anti-Detection Automation)"
     )
+    
+    # Globale Resilience-Flags
+    parser.add_argument("--auto-report", action="store_true", default=None, help="Enable auto GitHub issues on failure")
+    parser.add_argument("--no-auto-report", action="store_false", dest="auto_report", help="Disable auto GitHub issues")
+    parser.add_argument("--fail-fast", action="store_true", default=None, help="Stop flow immediately on any module failure")
+    parser.add_argument("--no-issue-dedup", action="store_true", help="Disable 24h deduplication for auto-issues")
+    
     subparsers = parser.add_subparsers(dest="command", help="Verfügbare Befehle")
     
     # run-survey
@@ -249,6 +256,11 @@ def main():
     preflight_check()
     parser = create_parser()
     args = parser.parse_args()
+    
+    # Resilience-Konfiguration global setzen
+    from playstealth_actions.resilience_config import ResilienceConfig, set_global_config
+    cfg = ResilienceConfig.from_env_or_args(args)
+    set_global_config(cfg)
     
     if not args.command:
         parser.print_help()
