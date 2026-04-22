@@ -1,15 +1,5 @@
-# v0 runtime files
-__v0_runtime_loader.js
-__v0_devtools.tsx
-__v0_jsx-dev-runtime.ts
-
-# Common ignores
-node_modules
-.next/
-.env*.local
+# PlayStealth local/runtime files
 .DS_Store
-
-# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -17,9 +7,11 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+dist/
+build/
 
-# Secondary repo checkouts used by v0 agent for cross-repo work.
-.bridge-work/
-
-# Local secrets - never commit
+# Local env and state
 .env
+.env.*
+.playwright/
+.cache/

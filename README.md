@@ -1,156 +1,71 @@
-# A2A-SIN-Worker-heyPiggy
+# PlayStealth CLI
 
-**Vision-Gate Worker für OpenSIN AI Agent System**
+Modulare Playwright+Stealth CLI für HeyPiggy-Survey-Flows.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![OpenSIN](https://img.shields.io/badge/OpenSIN-AI%20Agent%20System-green)](https://github.com/OpenSIN-AI)
+## Zweck
 
-## 🎯 Zweck
+Dieses Repository ist **ausschließlich** für die PlayStealth-CLI gedacht.
+Es enthält **keinen** HeyPiggy-Agenten-Worker mehr und ist bewusst als
+kleine Tool-Sammlung aufgebaut:
 
-Dieser Worker ist die **visuelle Intelligenz** des OpenSIN-Systems. Er verbindet sich mit der OpenSIN-Bridge (Chrome Extension) und führt **jede Aktion unter visueller Kontrolle eines Vision-LLMs** aus. Keine Aktion wird blind ausgeführt – jeder Klick, jede Eingabe wird vorher analysiert und nachher verifiziert.
+- 1 CLI
+- viele kleine Action-Module
+- eigene Diagnostics-Tools
+- Resume/State/Manifest für robuste Sessions
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    OpenSIN AI Ökosystem                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐   │
-│  │ Global Brain │────▶│   Bridge     │────▶│  HeyPiggy    │   │
-│  │  (Zentrale)  │     │ (Extension)  │     │   Worker     │   │
-│  └──────────────┘     └──────────────┘     └──────────────┘   │
-│         │                   │                   │              │
-│         ▼                   ▼                   ▼              │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐   │
-│  │  Strategie   │     │  DOM + CDP  │     │ Vision LLM   │   │
-│  │  Koordination│     │  Steuerung  │     │  Verifikation│   │
-│  └──────────────┘     └──────────────┘     └──────────────┘   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## 🔥 Kernfeatures
-
-| Feature | Beschreibung | Vorteil |
-|---------|--------------|---------|
-| **Vision-First** | Jede Aktion wird vom LLM visuell geprüft | 99.9% Erfolgsrate |
-| **Exakte Tab-Bindung** | Worker kontrolliert exakt einen Tab | Keine Interferenz mit anderen Tabs |
-| **Captcha-Bypass** | Erkennt und umgeht Captchas automatisch | Unterbrechungsfreie Sessions |
-| **Anti-Rausflug** | Konsistente Antworten über alle Surveys | Vermeidet Validation-Traps |
-| **Multi-Modal** | Audio, Video, Bilder, Text | Alle Umfragetypen unterstützt |
-| **Self-Healing** | Automatische Recovery bei Fehlern | Minimale Ausfallzeiten |
-| **Audit-Trail** | Jede Aktion wird geloggt | Vollständige Nachvollziehbarkeit |
-
-## 📦 Installation
+## Kernbefehle
 
 ```bash
-# Repository klonen
-git clone https://github.com/OpenSIN-AI/A2A-SIN-Worker-heypiggy.git
-cd A2A-SIN-Worker-heypiggy
-
-# Virtuelle Umgebung erstellen
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# oder: venv\Scripts\activate  # Windows
-
-# Abhängigkeiten installieren
-pip install -r requirements.txt
-
-# Konfiguration anpassen
-cp .env.example .env
-# Bearbeite .env mit deinen API-Keys
+playstealth open-list
+playstealth click-survey --index 0
+playstealth inspect-survey --index 0
+playstealth answer-survey --index 0 --option-index 0
+playstealth run-survey --index 0 --max-steps 5
+playstealth resume-survey --max-steps 5
+playstealth tools
+playstealth manifest
+playstealth state
+playstealth diagnose inspect-page
 ```
 
-## 🚀 Schnellstart
+## Installation
 
 ```bash
-# Worker starten
-python heypiggy_vision_worker.py
-
-# Oder mit Docker
-docker-compose up -d
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+playwright install chrome
 ```
 
-## 🏗️ Architektur
+## Wichtige Umgebungsvariablen
 
-### Hauptkomponenten
+Siehe `.env.example`.
 
-1. **heypiggy_vision_worker.py** – Zentrale Steuerlogik
-2. **media_router.py** – Multi-Modal Media Pipeline
-3. **survey_orchestrator.py** – Survey Queue Management
-4. **persona.py** – Persona-basierte Antwortgenerierung
-5. **global_brain_client.py** – OpenSIN Global Brain Integration
-6. **opensin_bridge/** – Bridge-Kommunikation
-7. **worker/** – Worker Runtime Utilities
+Wichtig:
+- Secrets gehören **nicht** in Git.
+- Secrets gehören in deine lokale Umgebung oder in Infisical.
 
-### Datenfluss
+## Architektur
 
-```
-1. Global Brain sendet Ziel-URL
-2. Worker öffnet exakt einen Tab (tabId wird gespeichert)
-3. Vision-LLM analysiert Screenshot
-4. Worker plant nächste Aktion
-5. Bridge führt Aktion im Tab aus
-6. Vision-LLM verifiziert Erfolg
-7. Bei Fehler: Retry mit alternativer Strategie
-8. Ergebnisse an Global Brain melden
-```
+- `playstealth_cli.py` — nur Parser/Dispatcher
+- `playstealth_actions/` — 1 Tool = 1 Modul
+- `playstealth_actions/tool_registry.py` — Tool-Liste
+- `playstealth_actions/tool_manifest.py` — JSON-Manifest
+- `playstealth_actions/state_store.py` — Persistenter Resume-State
+- `playwright_stealth_worker.py` — unterstützende Browser-/Profil-Helfer
 
-## 📋 Dokumentation
+## Produktionsstatus
 
-- [AGENTS.md](./AGENTS.md) – Guide für KI-Agenten
-- [CONTRIBUTING.md](./CONTRIBUTING.md) – Beiträge leisten
-- [SECURITY.md](./SECURITY.md) – Sicherheitsrichtlinien
-- [docs/](./docs/) – Technische Dokumentation
+Schon vorhanden:
+- Survey-Liste öffnen
+- Survey anklicken
+- neuen Tab verfolgen
+- Consent behandeln
+- gängige Fragetypen beantworten
+- State speichern und wiederaufnehmen
+- Diagnostics-Tools
 
-## 🔧 Konfiguration
-
-Wichtige Umgebungsvariablen:
-
-| Variable | Beschreibung | Beispiel |
-|----------|--------------|----------|
-| `NVIDIA_API_KEY` | NVIDIA NIM API Key | `nvapi-...` |
-| `VISION_BACKEND` | Backend Auswahl | `auto`, `nvidia` |
-| `BRIDGE_WS_URL` | WebSocket URL zur Bridge | `ws://localhost:8765` |
-| `PERSONA_FILE` | Pfad zur Persona-Datei | `profiles/jeremy.json` |
-
-## 🧪 Tests
-
-```bash
-# Alle Tests ausführen
-pytest tests/
-
-# Mit Coverage
-pytest --cov=. tests/
-```
-
-## 📊 Metriken
-
-- **Codezeilen:** ~16.500 Python
-- **Testabdeckung:** >85%
-- **Durchschnittliche Latenz:** <500ms pro Aktion
-- **Erfolgsrate:** >99% bei korrekter Konfiguration
-
-## 🔗 Integration ins OpenSIN-Ökosystem
-
-Dieser Worker ist Teil des größeren OpenSIN AI Agent Systems:
-
-- **[OpenSIN-Bridge](https://github.com/OpenSIN-AI/OpenSIN-Bridge)** – Chrome Extension für Browser-Automatisierung
-- **[Infra-SIN-Global-Brain](https://github.com/OpenSIN-AI/Infra-SIN-Global-Brain)** – Zentrale Koordinationsstelle
-- **[OpenSIN-overview](https://github.com/OpenSIN-AI/OpenSIN-overview)** – Gesamtübersicht aller Repos
-
-## ⚠️ Wichtige Hinweise für Entwickler
-
-1. **Keine blinden Änderungen:** Jede Datei ist ausführlich kommentiert. Lies die Kommentare bevor du änderst.
-2. **Tab-Bindung respektieren:** Ändere nichts an der Tab-ID-Logik – das bricht die gesamte Isolation.
-3. **Credentials schützen:** Passwörter werden NIEMALS an LLMs gesendet.
-4. **Human-Delays beibehalten:** Zufällige Pausen sind kritisch für Anti-Bot-Schutz.
-5. **Audit-Logs nicht deaktivieren:** Sie sind essenziell für Debugging und Compliance.
-
-## 📝 Lizenz
-
-MIT License – siehe [LICENSE](./LICENSE)
-
----
-
-**OpenSIN AI Agent System** – Building the future of autonomous agents.
+Noch weiter ausbaubar:
+- mehr robuste Selektor-Heuristiken
+- mehr Tests pro Fragetyp
+- zusätzliche CI-Checks
