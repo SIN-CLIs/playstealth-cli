@@ -46,6 +46,7 @@ from playstealth_actions.list_cards import print_cards as print_cards_run
 from playstealth_actions.page_utils import resolve_active_page
 from playstealth_actions.open_list import run as open_list_run
 from playstealth_actions.radio_question import run as radio_question_run
+from playstealth_actions.tool_registry import list_tools
 from playstealth_actions.survey_state import create_state
 from playstealth_actions.run_survey import run as run_survey_run
 from playstealth_actions.wait_question import run as wait_question_run
@@ -99,6 +100,8 @@ def _parser() -> argparse.ArgumentParser:
     run_cmd.add_argument(
         "--max-steps", type=int, default=20, help="Maximum survey-modal steps to attempt"
     )
+
+    sub.add_parser("tools", help="Print the PlayStealth tool registry")
 
     return parser
 
@@ -316,6 +319,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(answer_survey_run(args.timeout_seconds, args.index, args.option_index))
     if args.command == "run-survey":
         return asyncio.run(run_survey_run(args.timeout_seconds, args.index, args.max_steps))
+    if args.command == "tools":
+        for tool in list_tools():
+            print(f"{tool.name:20} {tool.status:10} {tool.module:40} {tool.purpose}")
+        return 0
 
     parser.error(f"unknown command: {args.command}")
     return 2
