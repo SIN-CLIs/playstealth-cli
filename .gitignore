@@ -1,41 +1,42 @@
-# Python artifacts
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Virtualenvs / tooling
-.venv/
+.Python
+env/
 venv/
-.mypy_cache/
+.venv/
+.ENV
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git/refs/replace/
+htmlcov/
+.hypothesis/
 .pytest_cache/
+.mypy_cache/
 
-# Build outputs
-dist/
-build/
-target/
-*.egg-info/
-
-# Runtime state / local data
-.playstealth_state/
-.playstealth-artifacts/
-
-# Local environment files
+# Environment
 .env
 .env.local
 *.env.*
-!.env.example
 
-# Editors / OS noise
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
 .DS_Store
 Thumbs.db
-
-# Coverage / logs
-.coverage
-coverage/
-htmlcov/
-*.log
-*.tmp
-*.swp
