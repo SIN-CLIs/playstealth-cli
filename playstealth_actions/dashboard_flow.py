@@ -8,7 +8,6 @@ WICHTIG:
 """
 
 import asyncio
-import os
 import time
 from playwright.async_api import async_playwright
 from .answer_strategies import get_strategy
@@ -25,8 +24,9 @@ from .persona_manager import get_persona
 from .survey_screener import check_disqualification, handle_disqualification
 from .consistency_validator import record_answer, validate_consistency, detect_straight_lining
 from .telemetry import log_event, generate_session_id
-from .stealth_enhancer import apply_stealth_profile, generate_user_agent
+from .stealth_enhancer import generate_user_agent
 from .smart_actions import SmartClickAction, SmartTypeAction
+from .state_store import launch_persistent_profile_context
 from .trap_detector import analyze_page_traps
 
 
@@ -79,20 +79,12 @@ async def run_dashboard_flow(
     completed_surveys = 0
 
     async with async_playwright() as p:
-        headless = str(os.getenv("PLAYSTEALTH_HEADLESS", "true")).lower() in ("true", "1", "yes")
-        browser = await p.chromium.launch(headless=headless)
         profile = {
             "ua": generate_user_agent("windows", "chrome"),
             "locale": "de-DE",
             "timezone": "Europe/Berlin",
         }
-        ctx = await browser.new_context(
-            user_agent=profile["ua"],
-            locale=profile["locale"],
-            timezone_id=profile["timezone"],
-            viewport={"width": 1920, "height": 1080},
-        )
-        await apply_stealth_profile(ctx, profile)
+        ctx = await launch_persistent_profile_context(p, profile)
         page = await ctx.new_page()
 
         try:
@@ -298,6 +290,6 @@ async def run_dashboard_flow(
             print(f"❌ Dashboard flow error: {e}")
             log_event(session_id, "flow_error", platform="dashboard", error_code=str(e))
         finally:
-            await browser.close()
+            await ctx.close()
             release_session_lock()
             print("🔓 Session lock released. Flow ended.")

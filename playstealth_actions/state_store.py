@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 
 try:
-    from playwright.async_api import Browser, BrowserContext
+    from playwright.async_api import Browser, BrowserContext, Playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -20,6 +20,109 @@ except ImportError:
 # State directory configuration
 STATE_DIR = Path(os.getenv("PLAYSTEALTH_STATE_DIR", ".playstealth_state"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+CHROME_USER_DATA_DIR = Path.home() / "Library/Application Support/Google/Chrome"
+
+
+def detect_chrome_profile_dir() -> str:
+    """Pick the preferred Chrome profile directory.
+
+    We prefer the explicit env override first, then fall back to common local
+    profile names so the operator's logged-in Chrome state can be reused.
+    """
+    preferred = os.getenv("HEYPIGGY_CHROME_PROFILE_DIR", "Default")
+    for candidate in [preferred, "Default", "Profile 18"]:
+        if (CHROME_USER_DATA_DIR / candidate).exists():
+            return candidate
+    return preferred
+
+
+def prepare_profile_root() -> Path:
+    """Create or reuse a persistent Playwright-safe Chrome profile clone."""
+    profile_root = Path(
+        os.getenv(
+            "PLAYSTEALTH_PROFILE_ROOT",
+            str(Path.home() / ".heypiggy" / "playwright_profile_clone"),
+        )
+    )
+    profile_root.mkdir(parents=True, exist_ok=True)
+    profile_dir = detect_chrome_profile_dir()
+    dst_profile = profile_root / profile_dir
+    if dst_profile.exists() and any(dst_profile.iterdir()):
+        return profile_root
+
+    for name in ("Local State", "First Run", "Last Version"):
+        src = CHROME_USER_DATA_DIR / name
+        if src.exists():
+            shutil.copy2(src, profile_root / name)
+
+    src_profile = CHROME_USER_DATA_DIR / profile_dir
+    if src_profile.exists():
+        shutil.copytree(
+            src_profile,
+            dst_profile,
+            symlinks=True,
+            ignore_dangling_symlinks=True,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                "SingletonLock",
+                "SingletonCookie",
+                "SingletonSocket",
+                "RunningChromeVersion",
+                "Crashpad",
+                "GPUCache",
+                "GrShaderCache",
+                "ShaderCache",
+                "Code Cache",
+                "DawnCache",
+                "Visited Links",
+                "chrome_debug.log",
+            ),
+        )
+    return profile_root
+
+
+async def launch_persistent_profile_context(
+    playwright: "Playwright",
+    profile: Optional[Dict[str, Any]] = None,
+) -> BrowserContext:
+    """Launch a persistent context backed by the saved Chrome default profile.
+
+    This is the operator-friendly path: one logged-in Chrome profile clone is
+    reused across runs so we avoid repeated logins and keep debug sessions stable.
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        raise ImportError("Playwright is required for browser context management")
+
+    from .stealth_enhancer import apply_stealth_profile, generate_user_agent
+
+    if profile is None:
+        profile = {
+            "ua": generate_user_agent("windows", "chrome"),
+            "locale": "de-DE",
+            "timezone": "Europe/Berlin",
+        }
+
+    profile_root = prepare_profile_root()
+    profile_dir = detect_chrome_profile_dir()
+    headless = str(os.getenv("PLAYSTEALTH_HEADLESS", "true")).lower() in ("true", "1", "yes")
+    context = await playwright.chromium.launch_persistent_context(
+        user_data_dir=str(profile_root),
+        headless=headless,
+        channel="chrome",
+        viewport={"width": 1920, "height": 1080},
+        locale=profile.get("locale", "de-DE"),
+        timezone_id=profile.get("timezone", "Europe/Berlin"),
+        user_agent=profile.get("ua"),
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            f"--profile-directory={profile_dir}",
+        ],
+    )
+    await apply_stealth_profile(context, profile)
+    return context
 
 
 def _session_dir(session_id: str) -> Path:

@@ -153,24 +153,16 @@ async def run_command(args):
     if args.command == "run-survey":
         from playstealth_actions.simple_survey_runner import execute_survey_flow
         from playstealth_actions.dashboard_flow import run_dashboard_flow
+        from playstealth_actions.state_store import launch_persistent_profile_context
         from playstealth_actions.telemetry import generate_session_id
         from playwright.async_api import async_playwright
-        from playstealth_actions.stealth_enhancer import inject_advanced_stealth
 
         session_id = generate_session_id()
         if args.url:
             survey_url = args.url
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    locale="de-DE",
-                    timezone_id="Europe/Berlin",
-                    viewport={"width": 1920, "height": 1080},
-                )
-
-                page = await ctx.new_page()
-                await inject_advanced_stealth(page)
+                ctx = await launch_persistent_profile_context(p)
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                 print(f"🚀 Starte Survey (Session: {session_id}, URL: {survey_url})")
 
@@ -182,7 +174,7 @@ async def run_command(args):
                     session_id=session_id,
                 )
 
-                await browser.close()
+                await ctx.close()
 
             if result["success"]:
                 print(f"✅ Survey abgeschlossen: {result['steps_completed']} Schritte")
@@ -215,7 +207,7 @@ async def run_command(args):
 
     elif args.command == "resume-survey":
         from playstealth_actions.simple_survey_runner import resume_survey_flow
-        from playstealth_actions.state_store import load_browser_context, list_sessions
+        from playstealth_actions.state_store import launch_persistent_profile_context, list_sessions
         from playwright.async_api import async_playwright
 
         print(f"🔄 Resume Survey für Session: {args.session_id}")
@@ -229,10 +221,8 @@ async def run_command(args):
             return
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-
             try:
-                ctx = await load_browser_context(browser, args.session_id)
+                ctx = await launch_persistent_profile_context(p)
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                 result = await resume_survey_flow(
@@ -257,7 +247,7 @@ async def run_command(args):
             except Exception as e:
                 print(f"❌ Fehler beim Resume: {e}")
             finally:
-                await browser.close()
+                await ctx.close()
     elif args.command == "profile":
         from playstealth_actions.survey_profiler import profile_survey
 
