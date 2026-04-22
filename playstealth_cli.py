@@ -240,6 +240,8 @@ async def run_command(args):
                     context=ctx,
                     session_id=args.session_id,
                     max_steps=args.max_steps,
+                    strategy_name="persona",
+                    strategy_persona="neutral",
                 )
 
                 if result["success"]:

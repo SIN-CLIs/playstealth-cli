@@ -1,10 +1,15 @@
 import abc
 from playwright.async_api import Page
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 
 class BasePlatform(abc.ABC):
     """Abstrakte Basis für alle Survey-Plattform-Plugins."""
+
+    @property
+    def platform_name(self) -> str:
+        """Stable telemetry/debug name for this platform plugin."""
+        return self.__class__.__name__
 
     @abc.abstractmethod
     async def detect(self, page: Page) -> bool:

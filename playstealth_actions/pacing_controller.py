@@ -1,5 +1,6 @@
 """Pacing Controller for human-like rhythms and session locking."""
 import asyncio
+import os
 import random
 import time
 from datetime import datetime, timedelta
@@ -35,5 +36,11 @@ async def inter_survey_break(min_min: float = 5.0, max_min: float = 25.0):
     await asyncio.sleep(mins * 60)
 
 def is_within_active_hours(start_h: int = 8, end_h: int = 22) -> bool:
-    """Circadianer Rhythmus: Keine 24/7-Aktivität."""
+    """Circadianer Rhythmus: Keine 24/7-Aktivität.
+
+    For local debugging or controlled operator runs we allow an explicit env
+    override so the CLI can still be tested outside normal active hours.
+    """
+    if os.getenv("PLAYSTEALTH_IGNORE_ACTIVE_HOURS", "").lower() in {"1", "true", "yes"}:
+        return True
     return start_h <= datetime.now().hour < end_h

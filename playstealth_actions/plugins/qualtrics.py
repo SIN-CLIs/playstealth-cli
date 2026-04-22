@@ -1,6 +1,8 @@
 import re
 from playwright.async_api import Page
 from .base_platform import BasePlatform
+from ..telemetry import log_event
+from ..trap_detector import analyze_page_traps
 
 
 class QualtricsPlatform(BasePlatform):
@@ -15,6 +17,7 @@ class QualtricsPlatform(BasePlatform):
             btn = await SmartClickAction().resolve(page, "Accept")
             if btn and await btn.is_visible(timeout=2000):
                 await btn.click()
+                log_event("plugin", "consent_handled", platform=self.platform_name)
                 return True
         except Exception:
             pass
@@ -26,10 +29,37 @@ class QualtricsPlatform(BasePlatform):
         return {"question": q_text.strip(), "option_count": len(opts), "type": "qualtrics_choice"}
 
     async def answer_question(self, page: Page, answer_data) -> bool:
+        option_texts = []
+        labels = await page.locator(".ChoiceStructure label, .q-radio, .q-checkbox").all()
+        for label in labels:
+            try:
+                option_texts.append((await label.inner_text()).strip())
+            except Exception:
+                option_texts.append("")
+        trap = await analyze_page_traps(
+            page,
+            (await self.get_current_step(page)).get("question", ""),
+            option_texts,
+        )
+        if trap["attention_check"] and trap["attention_check"].get("action") == "select_index":
+            answer_data = int(trap["attention_check"]["index"])
+            log_event(
+                "plugin",
+                "trap_hit",
+                platform=self.platform_name,
+                trap_type="attention_check",
+                metadata={"instruction": trap["attention_check"].get("instruction", "")[:120]},
+            )
         if isinstance(answer_data, int):
             opts = await page.locator(".ChoiceStructure label, .q-radio, .q-checkbox").all()
             if 0 <= answer_data < len(opts):
                 await opts[answer_data].click()
+                log_event(
+                    "plugin",
+                    "answer_selected",
+                    platform=self.platform_name,
+                    metadata={"index": answer_data},
+                )
                 return True
         return False
 
@@ -38,6 +68,7 @@ class QualtricsPlatform(BasePlatform):
             next_btn = page.locator("#NextButton")
             if await next_btn.is_visible():
                 await next_btn.click()
+                log_event("plugin", "navigate_next", platform=self.platform_name)
                 return True
         except Exception:
             pass

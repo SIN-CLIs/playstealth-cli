@@ -1,27 +1,52 @@
-"""
-Einfacher Survey Runner - Fokus auf Zuverlässigkeit statt Komplexität.
+"""Einfacher Survey Runner - Fokus auf Zuverlässigkeit statt Komplexität.
 
-Verwendet:
-- simple_selector.py für robuste Element-Lokalisierung
-- human_delay.py für menschliche Pausen
-- state_store.py für vollständige Session-Persistenz
+WICHTIG:
+- Dieser Runner ist der minimalistische URL-basierte Live-Pfad.
+- Wenn bereits eine konkrete Survey-URL bekannt ist, ist dieser Pfad oft
+  robuster als ein größerer Dashboard-Loop.
+- Er nutzt Plugins, Telemetrie, Trap-Detection und State-Persistenz, bleibt
+  aber bewusst kleiner und einfacher als die Dashboard-Orchestrierung.
 """
-import asyncio
 import time
 from typing import Optional, Dict, Any
 from playwright.async_api import Page, BrowserContext
 
-from .simple_selector import find_element, safe_click, safe_fill
+from .answer_strategies import get_strategy
+from .simple_selector import safe_click
 from .human_delay import fast_delay, medium_delay, slow_delay
-from .state_store import save_cli_state, save_browser_state, load_cli_state, list_sessions
+from .state_store import save_cli_state, save_browser_state, load_cli_state
 from .telemetry import log_event, generate_session_id
+from .trap_detector import analyze_page_traps
+from .plugins.loader import load_plugins, detect_platform
+
+
+async def _extract_option_texts(page: Page) -> list[str]:
+    """Collect visible option texts for strategy and trap logic.
+
+    We stay intentionally generic here because the simple runner is designed to
+    work across many survey pages without requiring panel-specific DOM code.
+    """
+    locators = await page.locator(
+        "label, .option, .q-radio, .q-checkbox, [role='radio'], [role='checkbox']"
+    ).all()
+    texts: list[str] = []
+    for locator in locators:
+        try:
+            text = (await locator.inner_text()).strip()
+            if text:
+                texts.append(text)
+        except Exception:
+            continue
+    return texts
 
 
 async def run_survey_step(
     page: Page,
     step_index: int,
     context: Optional[BrowserContext] = None,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    strategy=None,
+    platform=None,
 ) -> bool:
     """
     Führt einen einzelnen Survey-Schritt aus mit robusten Selektoren und Delays.
@@ -32,11 +57,73 @@ async def run_survey_step(
     start_time = time.perf_counter()
     
     try:
-        # Prüfen ob Survey noch existiert
+        # Prüfen ob Survey noch existiert.
+        # Wenn ein Plugin erkannt wurde, vertrauen wir stärker auf dessen
+        # get_current_step()-Logik und nicht nur auf generische Schlüsselwörter.
         page_content = await page.content()
-        if "survey" not in page_content.lower() and "question" not in page_content.lower():
+        if platform is None and "survey" not in page_content.lower() and "question" not in page_content.lower():
             print(f"   ℹ️  Step {step_index}: Keine Survey-Elemente erkannt - möglicherweise beendet")
             return False
+
+        # Plugin-first path: if we know the platform, use its purpose-built hooks.
+        if platform is not None:
+            try:
+                step = await platform.get_current_step(page)
+                question_text = step.get("question", "")
+                option_count = int(step.get("option_count", 0))
+                option_texts = await _extract_option_texts(page)
+                trap = await analyze_page_traps(page, question_text, option_texts)
+
+                if trap["attention_check"]:
+                    log_event(
+                        session_id or "unknown",
+                        "trap_hit",
+                        platform=platform.__class__.__name__,
+                        step_index=step_index,
+                        trap_type="attention_check",
+                        metadata={
+                            "instruction": trap["attention_check"].get("instruction", "")[:120]
+                        },
+                    )
+                if trap["honeypots"]:
+                    log_event(
+                        session_id or "unknown",
+                        "trap_hit",
+                        platform=platform.__class__.__name__,
+                        step_index=step_index,
+                        trap_type="honeypot",
+                        metadata={"count": len(trap["honeypots"])},
+                    )
+
+                answer_idx = 0
+                if strategy is not None:
+                    answer_idx = await strategy.choose(question_text, option_count, option_texts)
+                if trap["attention_check"] and trap["attention_check"].get("action") == "select_index":
+                    answer_idx = int(trap["attention_check"]["index"])
+                if option_count > 0:
+                    answer_idx = max(0, min(int(answer_idx), option_count - 1))
+
+                answered = await platform.answer_question(page, answer_idx)
+                if answered:
+                    await fast_delay()
+                    await platform.navigate_next(page)
+                    await medium_delay()
+                    duration_ms = (time.perf_counter() - start_time) * 1000
+                    log_event(
+                        session_id or "unknown",
+                        "step_end",
+                        platform=platform.__class__.__name__,
+                        step_index=step_index,
+                        duration_ms=duration_ms,
+                        success=True,
+                        metadata={"question_type": step.get("type", "unknown")},
+                    )
+                    return True
+            except Exception as e:
+                # WICHTIG: Plugin-Fehler nicht verschlucken. Ein kurzes Log hilft,
+                # damit Entwickler sehen, warum wir in den generischen Fallback
+                # gerutscht sind.
+                print(f"   ⚠️  Plugin-Pfad fehlgeschlagen: {e}")
         
         # Typische Survey-Elemente finden und interagieren
         # Priorität: Weiter-Buttons → Antwort-Optionen → Input-Felder
@@ -54,7 +141,7 @@ async def run_survey_step(
                     step_index=step_index,
                     duration_ms=duration_ms,
                     success=True,
-                    action=f"clicked_{btn_text}"
+                    metadata={"action": f"clicked_{btn_text}"},
                 )
                 return True
         
@@ -93,7 +180,7 @@ async def run_survey_step(
                                 step_index=step_index,
                                 duration_ms=duration_ms,
                                 success=True,
-                                action=f"answered_and_clicked_{btn_text}"
+                                metadata={"action": f"answered_and_clicked_{btn_text}"},
                             )
                             return True
                     
@@ -105,7 +192,7 @@ async def run_survey_step(
                         step_index=step_index,
                         duration_ms=duration_ms,
                         success=True,
-                        action=f"answered_{selector}"
+                        metadata={"action": f"answered_{selector}"},
                     )
                     return True
             except Exception:
@@ -136,7 +223,7 @@ async def run_survey_step(
                         step_index=step_index,
                         duration_ms=duration_ms,
                         success=True,
-                        action=f"filled_{selector}"
+                        metadata={"action": f"filled_{selector}"},
                     )
                     return True
             except Exception:
@@ -179,7 +266,9 @@ async def execute_survey_flow(
     context: BrowserContext,
     start_url: str,
     max_steps: int = 10,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    strategy_name: str = "persona",
+    strategy_persona: str = "neutral",
 ) -> Dict[str, Any]:
     """
     Haupt-Survey-Flow mit State-Persistenz nach jedem Schritt.
@@ -189,14 +278,27 @@ async def execute_survey_flow(
     """
     if session_id is None:
         session_id = generate_session_id()
+
+    strategy = get_strategy(strategy_name, persona=strategy_persona)
+    platform = None
     
     print(f"🚀 Starte Survey-Flow (Session: {session_id}, Max Steps: {max_steps})")
     
     # Initiale Navigation
     try:
-        await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
-        await medium_delay()
-        print(f"   ✓ Seite geladen: {start_url}")
+        current_content = (await page.content()).strip()
+        if start_url and not (start_url == "about:blank" and current_content):
+            await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+            await medium_delay()
+            print(f"   ✓ Seite geladen: {start_url}")
+        else:
+            print("   ✓ Verwende bereits geladene Survey-Seite")
+        try:
+            plugins = load_plugins()
+            platform = await detect_platform(page, plugins)
+            print(f"   🔌 Plattform erkannt: {platform.__class__.__name__}")
+        except Exception:
+            platform = None
     except Exception as e:
         print(f"   ❌ Fehler beim Laden der URL: {e}")
         return {
@@ -211,7 +313,7 @@ async def execute_survey_flow(
     for step in range(1, max_steps + 1):
         log_event(session_id, "step_start", step_index=step)
         
-        success = await run_survey_step(page, step, context, session_id)
+        success = await run_survey_step(page, step, context, session_id, strategy=strategy, platform=platform)
         
         if success:
             steps_completed = step
@@ -229,10 +331,18 @@ async def execute_survey_flow(
                 print(f"   ⚠️  State speichern fehlgeschlagen: {e}")
             
             print(f"   💾 State gespeichert (Step {step})")
+
+            if platform is not None:
+                try:
+                    if await platform.is_completed(page):
+                        print("   ✅ Plattform meldet Survey-Completion")
+                        break
+                except Exception:
+                    pass
         else:
             # Survey wahrscheinlich beendet oder Fehler
             if steps_completed == 0:
-                print(f"   ℹ️  Survey konnte nicht gestartet werden")
+                print("   ℹ️  Survey konnte nicht gestartet werden")
             else:
                 print(f"   ℹ️  Survey nach {steps_completed} Schritten beendet")
             break
@@ -246,7 +356,7 @@ async def execute_survey_flow(
             "timestamp": time.time(),
             "status": "completed" if steps_completed > 0 else "failed"
         })
-        print(f"💾 Finaler State gespeichert")
+        print("💾 Finaler State gespeichert")
     except Exception as e:
         print(f"⚠️  Finaler State speichern fehlgeschlagen: {e}")
     
@@ -262,7 +372,9 @@ async def resume_survey_flow(
     page: Page,
     context: BrowserContext,
     session_id: str,
-    max_steps: int = 10
+    max_steps: int = 10,
+    strategy_name: str = "persona",
+    strategy_persona: str = "neutral",
 ) -> Dict[str, Any]:
     """
     Setzt eine unterbrochene Survey-Session fort.
@@ -288,7 +400,9 @@ async def resume_survey_flow(
             page, context, 
             start_url=previous_url or "",
             max_steps=max_steps,
-            session_id=session_id
+            session_id=session_id,
+            strategy_name=strategy_name,
+            strategy_persona=strategy_persona,
         )
         
         result["resumed"] = True
