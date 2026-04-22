@@ -26,4 +26,4 @@ structlog==24.4.0
 # um Audio/Video-Assets von Survey-Seiten parallel herunterzuladen und die
 # NVIDIA NIM Multi-Modal Endpoints (Parakeet ASR, Cosmos-Reason Vision) zu
 # erreichen ohne den Event-Loop zu blockieren.
-aiohttp==3.10.11
+aiohttp==3.13.5
