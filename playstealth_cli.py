@@ -46,8 +46,7 @@ def create_parser():
     run_parser = subparsers.add_parser("run-survey", help="Survey ausführen")
     run_parser.add_argument("--index", type=int, default=0, help="Survey-Index")
     run_parser.add_argument("--max-steps", type=int, default=10, help="Maximale Schritte")
-    run_parser.add_argument("--strategy", choices=["random", "consistent", "persona"], default="persona", help="Antwort-Strategie")
-    run_parser.add_argument("--persona", choices=["optimistic", "critical", "neutral"], default="neutral", help="Persona-Profil")
+    run_parser.add_argument("--url", type=str, default=None, help="Survey URL (optional, sonst Plugin-default)")
     
     # resume-survey
     resume_parser = subparsers.add_parser("resume-survey", help="Survey fortsetzen")
@@ -96,14 +95,14 @@ async def run_command(args):
     """Führt den gewählten Befehl aus."""
     
     if args.command == "run-survey":
-        from playstealth_actions.answer_strategies import get_strategy
-        from playstealth_actions.telemetry import log_event, generate_session_id
+        from playstealth_actions.simple_survey_runner import execute_survey_flow
+        from playstealth_actions.telemetry import generate_session_id
         from playstealth_actions.plugins.loader import load_plugins, detect_platform
         from playwright.async_api import async_playwright
         from playstealth_actions.stealth_enhancer import inject_advanced_stealth
         
         session_id = generate_session_id()
-        strategy = get_strategy(args.strategy, persona=args.persona)
+        survey_url = args.url or "https://example.com/survey"  # Plugin-default fallback
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -113,29 +112,69 @@ async def run_command(args):
                 timezone_id="Europe/Berlin",
                 viewport={"width": 1920, "height": 1080}
             )
-            await inject_advanced_stealth(ctx.pages[0] if ctx.pages else await ctx.new_page())
+            
             page = await ctx.new_page()
+            await inject_advanced_stealth(page)
             
-            print(f"🚀 Starte Survey (Session: {session_id}, Strategy: {args.strategy})")
-            plugins = load_plugins()
+            print(f"🚀 Starte Survey (Session: {session_id}, URL: {survey_url})")
             
-            for step in range(1, args.max_steps + 1):
-                import time
-                start = time.perf_counter()
-                log_event(session_id, "step_start", platform="unknown", step_index=step)
-                
-                try:
-                    # Placeholder: Echte Survey-Logik hier
-                    print(f"   📝 Step {step}/{args.max_steps}")
-                    duration = (time.perf_counter() - start) * 1000
-                    log_event(session_id, "step_end", platform="unknown", step_index=step, duration_ms=duration, success=True)
-                except Exception as e:
-                    duration = (time.perf_counter() - start) * 1000
-                    log_event(session_id, "step_end", platform="unknown", step_index=step, duration_ms=duration, success=False, error_code=str(e))
-                    break
+            result = await execute_survey_flow(
+                page=page,
+                context=ctx,
+                start_url=survey_url,
+                max_steps=args.max_steps,
+                session_id=session_id
+            )
             
             await browser.close()
-        print("✅ Survey abgeschlossen")
+        
+        if result["success"]:
+            print(f"✅ Survey abgeschlossen: {result['steps_completed']} Schritte")
+            print(f"💾 Session-ID: {result['session_id']}")
+        else:
+            print(f"❌ Survey fehlgeschlagen: {result.get('error', 'Unbekannter Fehler')}")
+    
+    elif args.command == "resume-survey":
+        from playstealth_actions.simple_survey_runner import resume_survey_flow
+        from playstealth_actions.state_store import load_browser_context, list_sessions
+        from playwright.async_api import async_playwright
+        
+        print(f"🔄 Resume Survey für Session: {args.session_id}")
+        
+        # Prüfen ob Session existiert
+        available_sessions = list_sessions()
+        if args.session_id not in available_sessions:
+            print(f"❌ Session '{args.session_id}' nicht gefunden")
+            print(f"   Verfügbare Sessions: {', '.join(available_sessions) if available_sessions else 'Keine'}")
+            return
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            
+            try:
+                # Browser Context mit gespeichertem State laden
+                ctx = await load_browser_context(browser, args.session_id)
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                
+                result = await resume_survey_flow(
+                    page=page,
+                    context=ctx,
+                    session_id=args.session_id,
+                    max_steps=args.max_steps
+                )
+                
+                if result["success"]:
+                    print(f"✅ Resume erfolgreich: {result.get('steps_completed', 0)} weitere Schritte")
+                    print(f"💾 Session-ID: {result['session_id']}")
+                else:
+                    print(f"❌ Resume fehlgeschlagen: {result.get('error', 'Unbekannter Fehler')}")
+                    
+            except FileNotFoundError as e:
+                print(f"❌ State nicht gefunden: {e}")
+            except Exception as e:
+                print(f"❌ Fehler beim Resume: {e}")
+            finally:
+                await browser.close()
     
     elif args.command == "profile":
         from playstealth_actions.survey_profiler import profile_survey
