@@ -1,38 +1,64 @@
-"""Resilience configuration for PlayStealth CLI."""
+"""PlayStealth Resilience Config - Zentrale Konfiguration für Resilienz."""
 import os
+from typing import Optional, Any
 from dataclasses import dataclass
-from typing import Optional
+
 
 @dataclass
 class ResilienceConfig:
-    """Configuration for resilience features."""
-    auto_report: bool = True
-    fail_fast: bool = False
-    no_issue_dedup: bool = False
-
+    """Konfiguration für Resilienz-Features."""
+    
+    # Retry settings
+    max_retries: int = 3
+    retry_delay_base: float = 1.0
+    retry_delay_max: float = 10.0
+    
+    # Timeout settings
+    navigation_timeout: int = 30000
+    action_timeout: int = 15000
+    request_timeout: int = 60000
+    
+    # Fallback settings
+    enable_fallback_selectors: bool = True
+    enable_smart_resolver: bool = True
+    
+    # Circuit breaker
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_reset_timeout: int = 60
+    
+    # Reporting
+    enable_github_reporting: bool = False
+    enable_auto_heal: bool = False
+    
+    # Telemetry
+    enable_telemetry: bool = True
+    telemetry_batch_size: int = 10
+    
     @classmethod
-    def from_env_or_args(cls, args: Optional[object] = None) -> "ResilienceConfig":
-        """Load config from environment variables or CLI args."""
-        def _bool(val: str) -> bool:
-            return str(val).lower() in ("true", "1", "yes")
-        
+    def from_env_or_args(cls, args: Optional[Any] = None) -> "ResilienceConfig":
+        """Erstellt Config aus ENV oder CLI Args."""
         return cls(
-            auto_report=_bool(getattr(args, "auto_report", os.getenv("PLAYSTEALTH_AUTO_REPORT", "true"))),
-            fail_fast=_bool(getattr(args, "fail_fast", os.getenv("PLAYSTEALTH_FAIL_FAST", "false"))),
-            no_issue_dedup=_bool(getattr(args, "no_issue_dedup", os.getenv("PLAYSTEALTH_NO_ISSUE_DEDUP", "false")))
+            max_retries=int(os.getenv("PLAYSTEALTH_MAX_RETRIES", getattr(args, "max_retries", 3) or 3)),
+            navigation_timeout=int(os.getenv("PLAYSTEALTH_NAV_TIMEOUT", 30000)),
+            action_timeout=int(os.getenv("PLAYSTEALTH_ACTION_TIMEOUT", 15000)),
+            enable_github_reporting=os.getenv("GITHUB_APP_ID") is not None,
+            enable_auto_heal=os.getenv("PLAYSTEALTH_AUTO_HEAL", "false").lower() == "true",
+            enable_telemetry=os.getenv("PLAYSTEALTH_TELEMETRY", "true").lower() != "false"
         )
 
-# Global singleton
+
 _global_config: Optional[ResilienceConfig] = None
 
+
 def set_global_config(cfg: ResilienceConfig):
-    """Set global resilience configuration."""
+    """Setzt globale Config für alle Module."""
     global _global_config
     _global_config = cfg
 
+
 def get_global_config() -> ResilienceConfig:
-    """Get global resilience configuration."""
+    """Holt globale Config."""
     global _global_config
     if _global_config is None:
-        _global_config = ResilienceConfig.from_env_or_args()
+        _global_config = ResilienceConfig()
     return _global_config
